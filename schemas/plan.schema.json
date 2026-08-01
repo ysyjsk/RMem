@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Plan",
+  "type": "object",
+  "required": ["plan_id", "plan_family", "plan_set_id", "k", "leaf_ids", "ordered_merge_operations", "online_or_offline", "prefix_queryable", "budget_id", "generator_version"],
+  "properties": {
+    "plan_id": {"type": "string", "minLength": 1},
+    "plan_family": {"type": "string"},
+    "plan_set_id": {"enum": ["primary", "diagnostic", "online"]},
+    "k": {"enum": [4, 8, 16]},
+    "leaf_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true},
+    "ordered_merge_operations": {"type": "array"},
+    "online_or_offline": {"enum": ["online", "offline"]},
+    "prefix_queryable": {"type": "boolean"},
+    "rebuild_interval": {"type": ["integer", "null"], "minimum": 1},
+    "budget_id": {"type": "string"},
+    "generator_version": {"type": "string"}
+  }
+}
+

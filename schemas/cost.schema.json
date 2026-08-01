@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cost",
+  "type": "object",
+  "required": ["cost_id", "backbone_id", "k", "budget_id", "plan_id", "C_construct", "C_query"],
+  "properties": {
+    "cost_id": {"type": "string"},
+    "backbone_id": {"type": "string"},
+    "k": {"enum": [4, 8, 16]},
+    "budget_id": {"type": "string"},
+    "plan_id": {"type": "string"},
+    "C_construct": {"oneOf": [{"type": "number", "minimum": 0}, {"const": "unknown"}]},
+    "C_query": {"oneOf": [{"type": "number", "minimum": 0}, {"const": "unknown"}]},
+    "durable_state_tokens": {"oneOf": [{"type": "integer", "minimum": 0}, {"const": "unknown"}]},
+    "render_cost_tokens": {"oneOf": [{"type": "integer", "minimum": 0}, {"const": "unknown"}]},
+    "query_latency_ms": {"oneOf": [{"type": "number", "minimum": 0}, {"const": "unknown"}]}
+  }
+}
+

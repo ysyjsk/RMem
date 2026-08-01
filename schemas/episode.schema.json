@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Episode",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["dataset_id", "dataset_version_or_commit", "episode_id", "construction_unit_id", "ordered_evidence_ids", "query_ids", "family_id", "split", "provenance"],
+  "properties": {
+    "dataset_id": {"type": "string", "minLength": 1},
+    "dataset_version_or_commit": {"type": "string", "minLength": 1},
+    "episode_id": {"type": "string", "minLength": 1},
+    "construction_unit_id": {"type": "string", "minLength": 1},
+    "ordered_evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+    "query_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+    "family_id": {"type": "string", "minLength": 1},
+    "split": {"enum": ["development", "calibration", "acceptance"]},
+    "provenance": {"type": "object"}
+  }
+}
+

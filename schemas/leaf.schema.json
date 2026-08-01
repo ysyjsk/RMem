@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ViewNode",
+  "type": "object",
+  "required": ["node_id", "content", "covered_span", "provenance_evidence_ids", "parent_node_ids", "token_count", "capacity", "prompt_hash", "model_snapshot", "seed", "sha256"],
+  "properties": {
+    "node_id": {"type": "string", "minLength": 1},
+    "content": {"type": "string"},
+    "covered_span": {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}], "minItems": 2, "maxItems": 2},
+    "provenance_evidence_ids": {"type": "array", "items": {"type": "string"}},
+    "parent_node_ids": {"type": "array", "items": {"type": "string"}},
+    "token_count": {"type": "integer", "minimum": 0},
+    "capacity": {"type": "integer", "minimum": 1},
+    "prompt_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "model_snapshot": {"type": "string", "minLength": 1},
+    "seed": {"type": "integer"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}
+

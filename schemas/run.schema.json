@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Run",
+  "type": "object",
+  "required": ["run_id", "run_phase", "replicate_id", "episode_id", "k", "budget_id", "plan_id", "plan_set_id", "operator_config_id", "backbone_id", "constructor_model_snapshot", "merge_model_snapshot", "answer_model_snapshot", "s_leaf", "s_merge", "s_answer", "judge_config_hash", "artifact_hashes", "status"],
+  "properties": {
+    "run_id": {"type": "string"},
+    "run_phase": {"type": "string"},
+    "replicate_id": {"type": "integer", "minimum": 0},
+    "episode_id": {"type": "string"},
+    "k": {"enum": [4, 8, 16]},
+    "budget_id": {"type": "string"},
+    "plan_id": {"type": "string"},
+    "plan_set_id": {"enum": ["primary", "diagnostic", "online"]},
+    "operator_config_id": {"type": "string"},
+    "backbone_id": {"type": "string"},
+    "constructor_model_snapshot": {"type": "string"},
+    "merge_model_snapshot": {"type": "string"},
+    "answer_model_snapshot": {"type": "string"},
+    "embedding_model_snapshot": {"type": ["string", "null"]},
+    "s_leaf": {"type": "integer"},
+    "s_merge": {"type": "integer"},
+    "s_answer": {"type": "integer"},
+    "judge_config_hash": {"type": "string"},
+    "retrieval_config_hash": {"type": ["string", "null"]},
+    "artifact_hashes": {"type": "object"},
+    "status": {"type": "string"}
+  }
+}
+

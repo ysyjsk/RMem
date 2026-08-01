@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Score",
+  "type": "object",
+  "required": ["score_id", "run_id", "query_id", "score", "evaluator_id", "judge_cache_key"],
+  "properties": {
+    "score_id": {"type": "string"},
+    "run_id": {"type": "string"},
+    "query_id": {"type": "string"},
+    "score": {"type": "number", "minimum": 0, "maximum": 1},
+    "evaluator_id": {"type": "string"},
+    "judge_cache_key": {"type": "string", "minLength": 1}
+  }
+}
+

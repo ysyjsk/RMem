@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Evidence",
+  "type": "object",
+  "required": ["evidence_id", "episode_id", "sequence_index", "raw_content", "token_count", "sha256"],
+  "properties": {
+    "evidence_id": {"type": "string", "minLength": 1},
+    "episode_id": {"type": "string", "minLength": 1},
+    "sequence_index": {"type": "integer", "minimum": 0},
+    "raw_content": {"type": "string"},
+    "token_count": {"type": "integer", "minimum": 0},
+    "event_time": {"type": ["string", "null"]},
+    "valid_time": {"type": ["string", "null"]},
+    "source_metadata": {"type": "object"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}
+

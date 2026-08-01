@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RetrievalConfig",
+  "type": "object",
+  "required": ["retrieval_config_id", "embedding_model_snapshot", "tokenizer_snapshot", "retrieval_unit_version", "similarity_metric", "candidate_top_k", "packing_policy", "render_order", "tie_break", "index_version", "sha256"],
+  "properties": {
+    "retrieval_config_id": {"type": "string"},
+    "embedding_model_snapshot": {"type": "string"},
+    "tokenizer_snapshot": {"type": "string"},
+    "retrieval_unit_version": {"type": "string"},
+    "similarity_metric": {"const": "cosine_normalized"},
+    "candidate_top_k": {"const": "all"},
+    "packing_policy": {"const": "deterministic_greedy_no_truncate"},
+    "render_order": {"const": "chronological"},
+    "tie_break": {"type": "array", "items": {"type": "string"}},
+    "index_version": {"type": "string"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}
+

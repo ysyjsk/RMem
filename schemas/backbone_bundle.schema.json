@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BackboneBundle",
+  "type": "object",
+  "required": ["backbone_id", "role", "model_family", "constructor_model_snapshot", "merge_model_snapshot", "answer_model_snapshot", "provider", "endpoint", "decoding_config_hash"],
+  "properties": {
+    "backbone_id": {"type": "string"},
+    "role": {"enum": ["primary", "replication"]},
+    "model_family": {"type": "string"},
+    "constructor_model_snapshot": {"type": "string"},
+    "merge_model_snapshot": {"type": "string"},
+    "answer_model_snapshot": {"type": "string"},
+    "provider": {"type": "string"},
+    "endpoint": {"type": "string"},
+    "decoding_config_hash": {"type": "string"},
+    "day1_probe_artifact": {"type": ["string", "null"]},
+    "cost_budget_artifact": {"type": ["string", "null"]}
+  }
+}
+

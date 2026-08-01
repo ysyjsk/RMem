@@ -1,0 +1,18 @@
+{
+  "fixture_only": true,
+  "not_acceptance_data": true,
+  "episodes": [
+    {"episode_id": "ep-4", "atomic_evidence_count": 4},
+    {"episode_id": "ep-8", "atomic_evidence_count": 8},
+    {"episode_id": "ep-16a", "atomic_evidence_count": 16},
+    {"episode_id": "ep-16b", "atomic_evidence_count": 18}
+  ],
+  "frozen_contracts": {
+    "K_planned": [4, 8, 16],
+    "k_primary": 8,
+    "R_pilot": 3,
+    "R_formal": 5,
+    "delta_SESOI": 0.05
+  }
+}
+
