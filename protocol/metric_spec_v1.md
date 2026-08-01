@@ -34,7 +34,7 @@ right_deep is diagnostic-only and cannot enter the headline primary statistic.
 
 ## Statistical Tests
 
-Primary test is a two-sided paired permutation over episode x replicate blocks, swapping only left-deep and canonical-balanced labels. Same-plan seed null is diagnostic only and preserves the same R-run averaging structure.
+Primary test is a two-sided paired permutation over episode blocks. For each episode, repeated runs are paired by replicate and averaged into one canonical_balanced - left_deep difference before sign-flip permutation. Same-plan seed null is diagnostic only and preserves the same R-run averaging structure.
 
 ## Thresholds
 
@@ -50,4 +50,3 @@ delta_decision must be frozen by G-POWER-FEASIBILITY before topology results.
 C_life = C_construct + C_query
 
 Costs are stratified by backbone x k x budget x plan. Missing cost is unknown, never silent zero.
-

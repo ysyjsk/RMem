@@ -2,13 +2,29 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from typing import Any
+import re
 
 from .contracts import ContractError
 from .hashing import stable_hash
 
 
+def _normalize_answer(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
 def exact_match_score(reference: str, candidate: str) -> int:
-    return int(reference.strip().lower() == candidate.strip().lower())
+    return int(_normalize_answer(reference) == _normalize_answer(candidate))
+
+
+def substring_exact_match_score(reference: str | Iterable[str], candidate: str) -> int:
+    if isinstance(reference, str):
+        references = (reference,)
+    else:
+        references = tuple(reference)
+    candidate_norm = _normalize_answer(candidate)
+    return int(
+        any(_normalize_answer(item) and _normalize_answer(item) in candidate_norm for item in references)
+    )
 
 
 def validate_project_judge_config(config: Mapping[str, Any]) -> None:
@@ -51,4 +67,3 @@ def repeatability_metrics(rows: Iterable[Mapping[str, Any]]) -> dict[str, float]
 def judge_repeatability_passes(rows: Iterable[Mapping[str, Any]]) -> bool:
     metrics = repeatability_metrics(rows)
     return metrics["unanimity_rate"] >= 0.95 and metrics["pairwise_flip_rate"] <= 0.05 and metrics["parse_success_rate"] == 1.0
-

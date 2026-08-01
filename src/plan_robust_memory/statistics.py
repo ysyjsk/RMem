@@ -92,23 +92,39 @@ def validate_common_random_numbers(rows: list[Mapping[str, object]]) -> None:
 def paired_permutation_delta(
     paired_rows: list[Mapping[str, object]], *, permutations: int = 1000, seed: int = 0
 ) -> dict[str, float]:
-    by_block: dict[tuple[str, int], dict[str, float]] = {}
+    by_block: dict[str, dict[int, dict[str, float]]] = {}
     for row in paired_rows:
-        key = (str(row["episode_id"]), int(row["replicate_id"]))
-        by_block.setdefault(key, {})[str(row["plan_id"])] = float(row["score"])
-    diffs = []
-    for values in by_block.values():
-        if set(values) != set(PI_PRIMARY):
+        episode_id = str(row["episode_id"])
+        replicate_id = int(row["replicate_id"])
+        by_block.setdefault(episode_id, {}).setdefault(replicate_id, {})[
+            str(row["plan_id"])
+        ] = float(row["score"])
+
+    episode_diffs = []
+    for replicate_blocks in by_block.values():
+        replicate_diffs = []
+        for values in replicate_blocks.values():
+            if set(values) != set(PI_PRIMARY):
+                raise StatisticContractError("paired permutation blocks must contain only Pi_primary")
+            replicate_diffs.append(values["canonical_balanced"] - values["left_deep"])
+        if not replicate_diffs:
             raise StatisticContractError("paired permutation blocks must contain only Pi_primary")
-        diffs.append(values["canonical_balanced"] - values["left_deep"])
-    observed = fmean(diffs)
+        episode_diffs.append(fmean(replicate_diffs))
+    if not episode_diffs:
+        raise StatisticContractError("paired permutation requires at least one episode block")
+
+    observed = fmean(episode_diffs)
     rng = random.Random(seed)
     more_extreme = 0
     for _ in range(permutations):
-        sampled = [diff if rng.random() < 0.5 else -diff for diff in diffs]
+        sampled = [diff if rng.random() < 0.5 else -diff for diff in episode_diffs]
         if abs(fmean(sampled)) >= abs(observed):
             more_extreme += 1
-    return {"delta": observed, "p_value": (more_extreme + 1) / (permutations + 1)}
+    return {
+        "delta": observed,
+        "p_value": (more_extreme + 1) / (permutations + 1),
+        "independent_blocks": float(len(episode_diffs)),
+    }
 
 
 def validate_delta_decision_artifact(artifact: Mapping[str, object]) -> float:
