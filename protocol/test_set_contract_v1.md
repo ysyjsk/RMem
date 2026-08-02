@@ -46,8 +46,18 @@ rows are explicitly excluded and listed in `excluded_items.jsonl`.
 G-POWER-FEASIBILITY passed from this real manifest with
 `delta_decision=0.10`; this does not constitute a topology result.
 
-The Day 1 model/embedding Gate is blocked by absent credentials/model access
-and an unqualified local embedding environment. MemoryAgentBench, LoCoMo,
-second-source qualification, judge repeatability, SATURATION-01, and all
-acceptance experiments remain pending. Full leaf generation therefore remains
-forbidden.
+BGE-M3 local embedding qualification passed at the frozen model/tokenizer
+revision `5617a9f61b028005a4858fdac845db406aefb181` on the local RTX 3090 Ti.
+The real development episode `06db6396` covered all 51 timestamped sessions
+(133,100 surrogate tokens); two fp16 encode runs produced identical embedding,
+ranking, and packing hashes without exceeding the 8,192-token unit limit.
+
+Day 1 remains blocked: direct and `127.0.0.1:17897` model-inventory requests
+both returned HTTP 400 with empty response bodies. The provider credential is present
+and was loaded from the environment without being written to artifacts, but no
+authenticated inventory was returned, no different-family replication model is
+frozen, and the full provider-priced cost upper bound is not frozen. A subsequent offline rerun resolved the same frozen BGE-M3 weight from the repo-local
+cache and restored the current embedding artifact to passed without changing the
+model revision or SHA-256. MemoryAgentBench, LoCoMo, second-source qualification, judge
+repeatability, SATURATION-01, and all acceptance experiments remain pending.
+Full leaf generation therefore remains forbidden.

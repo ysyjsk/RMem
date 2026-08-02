@@ -28,7 +28,7 @@ def valid_backbone() -> dict:
         "merge_model_snapshot": "gpt-5.6-sol-2026-08-01",
         "answer_model_snapshot": "gpt-5.6-sol-2026-08-01",
         "provider": "labforge",
-        "endpoint": "responses",
+        "endpoint": "chat_completions",
         "decoding_config_hash": "a" * 64,
     }
 
@@ -60,4 +60,3 @@ def score_rows() -> list[dict]:
         {"episode_id": "ep-2", "budget": 512, "plan_id": "canonical_balanced", "replicate_id": 0, "query_id": "q2", "score": 1},
         {"episode_id": "ep-2", "budget": 512, "plan_id": "right_deep", "replicate_id": 0, "query_id": "q2", "score": 0},
     ]
-

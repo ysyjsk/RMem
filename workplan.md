@@ -1,4 +1,4 @@
-# Plan-Robust Agent Memory：第一阶段严格工作计划 v1.0-rc3
+# Plan-Robust Agent Memory：第一阶段严格工作计划 eval-protocol-v1.0-rc3
 
 ## 版本信息
 
@@ -98,7 +98,7 @@ Primary budget sweep 明确规定：
 B_merge = B_final = B_query = B
 ```
 
-“跨 topology 固定”只指同一个 budget 点内固定，不代表跨 budget 固定。`B_query` 指 answer model 接收的 memory payload 上限，不包含 system prompt、question 和固定格式开销。
+“跨 topology 固定”只指同一个 budget 点内固定，不代表跨 budget 固定。`B_query` 指 answer model 接收的 memory payload 上限，不包含同一个唯一 `user.content` 中的 question、固定 instruction 和固定序列化开销；请求不存在 `system` 或 `developer` role。
 
 
 ### E8. `k` 参数化，但 primary 仍固定为 `k=8`
@@ -246,7 +246,7 @@ Primary leaves 跨所有 budget 复用。不同 merge prompt 属于不同 operat
 
 ## P4. 行为等价而非文本等价
 
-文本不同不构成错误；held-out query/task 行为不同才构成非等价。stale、omission、corruption、hallucination 等 operation-level 类别在 v1.0 中保留定义，但其自动 judge 和大规模人工资格验证移到 v1.1。
+文本不同不构成错误；held-out query/task 行为不同才构成非等价。stale、omission、corruption、hallucination 等 operation-level 类别在 `eval-protocol-v1.0` 中保留定义，但其自动 judge 和大规模人工资格验证移到 `eval-protocol-v1.1`。
 
 ## P5. 统计单元不得伪造
 
@@ -303,7 +303,7 @@ B_merge = B_final = B_query = B
 - 若 provider 暴露 explicit version/snapshot，必须使用；若只暴露稳定 model ID，则冻结返回字段和全部 judge cache，并明确时间重放限制；
 - 官方 LongMemEval GPT-4o 只作为 compatibility audit；可访问时使用带日期 snapshot，不改变项目内 primary judge 结果；
 - 禁止 silent fallback；
-- 新增 operation-level judge 不属于 v1.0；
+- 新增 operation-level judge 不属于 `eval-protocol-v1.0`；
 - primary judge endpoint 和 official compatibility snapshot（若计划使用）均在 Day 1 探活。
 
 ## P10. 不合并为单一总分
@@ -414,7 +414,9 @@ Primary topology comparison 内固定 backbone 和 retriever。模型家族变�
 17897
 ```
 
-默认先尝试回环代理：
+连接顺序固定为 direct → `http://127.0.0.1:17897`：先直连，直连失败后才设置回环代理进行第二次实质不同的尝试。
+
+代理回退配置：
 
 ```bash
 export http_proxy=http://127.0.0.1:17897
@@ -425,11 +427,33 @@ export HTTPS_PROXY=http://127.0.0.1:17897
 
 要求：
 
-1. Day 1 执行代理探活并记录结果；
+1. Day 1 分别执行直连与必要的代理回退探活并记录结果，禁止默认先走代理；
 2. 不假设代理永久可用，每次关键下载前执行轻量连通性测试；
 3. 下载数据后仍以 file checksum/commit 为真值，不能把“请求成功”当作数据正确；
 4. API judge 或模型请求必须记录是否经过代理、目标 endpoint 和失败原因；
 5. 若 `127.0.0.1:17897` 在当前机器不可达，应检查 SSH reverse tunnel/代理进程，而不是直接修改研究协议。
+6. 直连和代理两次实质不同的尝试仍无进展时，立即生成 stall report 并报告用户，不得无限重试。
+
+### 3.1.1 Day 1 API 与纯净消息合同
+
+Day 1 与后续正式生成调用冻结为：
+
+```text
+base_url: https://api.labforge.cc/v1
+model_inventory_endpoint: /models
+generation_endpoint: /chat/completions
+generation_url: https://api.labforge.cc/v1/chat/completions
+request_protocol: OpenAI-compatible Chat Completions
+request_output_limit_field: max_tokens
+max_route_attempts: 2
+response_field: choices[0].message.content
+usage_fields: prompt_tokens, completion_tokens
+fallback_order: direct, http://127.0.0.1:17897
+```
+
+每个生成请求必须包含 exactly one `user` message；客户端不得注入 `system` 或 `developer` message，不得添加隐藏 prompt，也不得改用 `/responses`。这里的“纯净”仅证明客户端 payload 符合合同；对 provider 侧不可见策略不作无法验证的声明。
+
+每个 probe artifact 必须记录最终 URL/endpoint、实际 route、requested/returned model、usage、request ID、response hash 和失败尝试。API key 只能从环境变量读取，禁止写入 artifact、日志、cache 或版本库。
 
 ## 3.2 防止原地踏步的执行循环
 
@@ -755,7 +779,7 @@ s_answer = r
 
 禁止将 issue 帖或论文中的 78、133、211 直接写成数据合同；实际文件 manifest 才是唯一计数依据。数据计数完成后必须立即触发 `G-POWER-FEASIBILITY`，不能等到统计代码全部完成后再判断设计是否可决策。
 
-Primary v1.0 默认：
+Primary `eval-protocol-v1.0` 默认：
 
 ```text
 question_type ∈ {knowledge-update, temporal-reasoning}
@@ -893,7 +917,7 @@ checksums.sha256
 
 1. Episode/construction unit：split、leaf、plan、cluster；
 2. Query：task score；
-3. Operation item：v1.1 错误审计。
+3. Operation item：`eval-protocol-v1.1` 错误审计。
 
 Primary score 先在 episode 内聚合 query，再在 episode 间 macro-average。
 
@@ -1121,7 +1145,7 @@ B_merge = B_final = B_query = B
 
 - 同一 budget 点内，B 在所有 topology 间相同；
 - 不同 budget 点之间同步变化；
-- `B_query` 不包含 system prompt、question、固定 instruction 和固定序列化开销；
+- `B_query` 不包含同一个唯一 `user.content` 中的 question、固定 instruction 和固定序列化开销；请求不存在 `system` 或 `developer` role；
 - 固定开销单独记账；
 - `f_raw(B)` 与 `rho_leaf(B,k)` 使用同一个 B。
 
@@ -1917,9 +1941,9 @@ Missing cost 必须是 `unknown`，不能默认为 0。
 
 ## 12.15 Operation-level Audit
 
-v1.0 仅保留 omission、stale、corruption、hallucination、preservation、faithfulness 的 schema 和分母定义。
+`eval-protocol-v1.0` 仅保留 omission、stale、corruption、hallucination、preservation、faithfulness 的 schema 和分母定义。
 
-自动 judge、双人工标注和 adjudication 整体移到 `eval-protocol-v1.1`，不作为 v1.0 Gate。
+自动 judge、双人工标注和 adjudication 整体移到 `eval-protocol-v1.1`，不作为 `eval-protocol-v1.0` Gate。
 
 # 13. 工作包 T8：Evaluator 资格验证与 Judge Cache
 
@@ -2016,7 +2040,7 @@ parse_success_rate   == 1.00
 3. 使用同一 50-case set 之外的新 qualification subset 复验；
 4. 仍失败则 LongMemEval task score 不能用于 confirmatory result。
 
-Repeatability 只验证稳定性，不宣称 judge 对真实正确性的人工一致性；后者属于 v1.1。
+Repeatability 只验证稳定性，不宣称 judge 对真实正确性的人工一致性；后者属于 `eval-protocol-v1.1`。
 
 ## 13.5 Judge Blindness
 
@@ -2154,13 +2178,34 @@ Day 1 必须完成：
 11. 冻结 `R_pilot=3`、`R_formal=5`；
 12. 生成 primary、replication、SATURATION、D_leaf 和 future k-sweep 成本上界。
 
+唯一执行入口为：
+
+```bash
+python -m plan_robust_memory.probe_day1
+```
+
+必须完整产出八个文件：
+
+```text
+proxy_probe.json
+model_inventory.json
+primary_115k_probe.json
+primary_output_probe.json
+judge_probe.json
+replication_model_probe.json
+embedding_probe.json
+cost_upper_bound.json
+```
+
+其中 `/models` 只用于 inventory；primary 115K、primary 4096-output、judge 与 replication 的生成探针必须使用 `https://api.labforge.cc/v1/chat/completions`、单一 `user` message 和 wire 字段 `max_tokens`。route 只允许两次：`direct`，失败后 `proxy_17897`；禁止同一路径无证据重试。任何旧的模型框架 v1.0/v1.1 别名、`/responses` 请求或客户端角色注入均不构成合格的 Day 1 证据。
+
 具体模型调用方式、API/本地分工、代理、probe 和 fallback 规则以同目录的唯一 canonical 文件为准：
 
 ```text
 Plan_Robust_Agent_Memory_Model_Framework_Usage.md
 ```
 
-历史提法中的模型框架 `v1.0` 与 `v1.1` 均为该文件的别名，不表示不同合同，也不得与 `eval-protocol-v1.0/v1.1` 的阶段版本混用。
+历史提法中的模型框架 `v1.0` 与 `v1.1` 是同一文件的废弃别名，不表示不同合同；当前及后续工作只允许使用上述无版本 canonical 文件名。`eval-protocol-v1.0/v1.1` 仍表示不同评估阶段，不得与模型框架名称混用。
 
 Day 1 若样本量、模型窗口、不同家族 replication model、embedding revision 或网络条件不可行，立即报告用户，不继续堆代码。
 
@@ -2216,7 +2261,7 @@ Day 1 若样本量、模型窗口、不同家族 replication model、embedding r
 - 至少一个额外独立来源候选的 desk audit；
 - replication dataset decision log。
 
-这些审计不阻塞 LongMemEval harness，但必须在 v1.0 report 中完成。
+这些审计不阻塞 LongMemEval harness，但必须在 `eval-protocol-v1.0` report 中完成。
 
 ## M6：Parameterized Leaf、Capacity、Retriever、Depth 与 Prompts
 
@@ -2619,6 +2664,10 @@ tests/integration/test_replication_backbone_probe.py
 tests/integration/test_retain_retrieval_pipeline.py
 tests/integration/test_proxy_17897_probe.py
 
+tests/day1/test_probe_day1_cli.py
+tests/regression/test_model_framework_single_source.py
+tests/regression/test_day1_report_consistency.py
+
 tests/leakage/test_construction_unit_overlap.py
 tests/leakage/test_base_question_overlap.py
 tests/leakage/test_answer_session_overlap.py
@@ -2729,7 +2778,7 @@ pytest \
 - [ ] right-deep 仅进入 diagnostic/depth analyses；
 - [ ] paired permutation 有 block-preservation test；
 - [ ] formal NO-GO 依赖 power + CI/equivalence；
-- [ ] operation-level audit 明确标为 v1.1；
+- [ ] operation-level audit 明确标为 `eval-protocol-v1.1`；
 - [ ] durable-state/render cost 进入 online-balanced Gate；
 - [ ] cost logger 无 silent zero；
 - [ ] progress log 与 stall escalation 已实现；

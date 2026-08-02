@@ -1,21 +1,33 @@
 # Plan-Robust Agent Memory：模型调用框架使用说明
 
-> **统一版本说明**：历史讨论中的“模型框架 v1.0”和“模型框架 v1.1”指同一份执行合同。为避免与 `eval-protocol-v1.0/v1.1` 的阶段含义混淆，仓库内统一以本无版本文件为唯一 canonical source；版本号别名不再用于引用。
+> **统一版本说明**：历史讨论中的“模型框架 v1.0”和“模型框架 v1.1”指同一份执行合同，不是两个版本。为避免与 `eval-protocol-v1.0/v1.1` 的阶段含义混淆，仓库内只允许引用本无版本文件；任何带版本号的模型框架名称均为废弃别名，不得再用于配置、报告或讨论。
 
 ## 0. 文档定位
 
 本文档是 `Plan_Robust_Agent_Memory_Phase1_TDD_Workplan` 的配套执行说明。
 
-注意api-key已经通过
+API key 只通过运行环境注入，不得写入配置、日志或 artifact：
 
-export OPENAI_API_KEY="具体API_KEY"
+```bash
+export OPENAI_API_KEY="..."
+```
 
-注入了，如果用openai的接口的话，把baseurl改成https://api.labforge.cc/v1
+本项目的 OpenAI-compatible API 合同冻结如下：
 
-curl "https://api.labforge.cc/v1/models" \
-  -H "Authorization: Bearer sk-你的 API Key"
+```text
+base_url: https://api.labforge.cc/v1
+model_inventory_endpoint: /models
+generation_endpoint: /chat/completions
+generation_url: https://api.labforge.cc/v1/chat/completions
+request_protocol: OpenAI-compatible Chat Completions
+response_field: choices[0].message.content
+usage_input_field: prompt_tokens
+usage_output_field: completion_tokens
+```
 
-如果出现问题请停止直接向我报告
+所有生成请求必须包含 exactly one `user` message；客户端不得注入 `system` 或 `developer` message，也不得拼接任何隐藏 prompt。`/responses` 不属于本项目 Day 1 或正式实验的生成协议。这里的“纯净回复”指客户端请求体无额外角色或隐藏指令；provider 侧不可见策略不在客户端可验证范围内，不能被宣称为不存在。
+
+连接顺序固定为 direct → `http://127.0.0.1:17897`。两次实质不同的尝试均失败时，必须生成 stall report 并立即报告，不得无限重试。
 
 它只负责冻结以下内容：
 
@@ -241,6 +253,11 @@ input_tokens
 output_tokens
 latency
 response_hash
+endpoint
+request_protocol
+message_contract
+route
+failed_attempts
 created_at
 
 3. 正式生成模型：gpt-5.6-sol
@@ -296,10 +313,14 @@ mu_(gpt-5.6-sol, prompt_id, B)
 推荐冻结为：
 
 model: gpt-5.6-sol
-endpoint: responses
+base_url: https://api.labforge.cc/v1
+endpoint: /chat/completions
+messages: exactly one user message
+system_or_developer_message: forbidden
+request_output_limit_field: max_tokens
 temperature: 0
 top_p: 1
-max_retries: 3
+max_route_attempts: 2
 timeout_seconds: 300
 stream: false
 
@@ -650,7 +671,7 @@ periodic reconstruction；
 
 默认：
 
-max_output_tokens: 512
+max_tokens: 512
 temperature: 0
 
 用途：
@@ -779,8 +800,8 @@ reason 仅用于错误检查，不作为自动二次判分输入。
 
 model: gpt-5.5
 temperature: 0
-max_output_tokens: 128
-response_format: json
+max_tokens: 128
+response_format: not sent; local strict JSON parser is authoritative
 
 如果 provider 不支持严格 JSON schema：
 
@@ -1086,6 +1107,27 @@ Embedding / Retrieval:
 
 11. Day 1 推理基座探针
 
+唯一执行入口：
+
+```bash
+python -m plan_robust_memory.probe_day1
+```
+
+该命令必须产出以下八个文件；缺任何一个都属于 blocked，而不是 partial pass：
+
+```text
+proxy_probe.json
+model_inventory.json
+primary_115k_probe.json
+primary_output_probe.json
+judge_probe.json
+replication_model_probe.json
+embedding_probe.json
+cost_upper_bound.json
+```
+
+生成 wire payload 使用 `max_tokens`；`max_output_tokens` 只可作为内部预算命名，禁止出现在 Chat Completions 请求体。每个生成 artifact 记录 exact endpoint、request_protocol、message_contract、实际 route、failed attempts、usage、request ID 与 response hash。
+
 11.1 必须探测的模型
 
 gpt-5.6-sol
@@ -1104,7 +1146,7 @@ gpt-5.4-mini
 测试：
 
 input_tokens: approximately 115000
-max_output_tokens: 512
+max_tokens: 512
 concurrency:
   - 1
   - 2
@@ -1113,7 +1155,7 @@ concurrency:
 额外执行：
 
 input_tokens: small
-max_output_tokens: 4096
+max_tokens: 4096
 
 记录：
 
@@ -1137,7 +1179,7 @@ HTTP status；
 
 cost；
 
-proxy route。
+actual route (direct or proxy_17897)。
 
 11.3 gpt-5.5 Judge Probe
 
@@ -1265,7 +1307,9 @@ gpt-5.5
 13.1 环境变量
 
 export OPENAI_API_KEY="..."
-export OPENAI_BASE_URL="https://<provider>/v1"
+export OPENAI_BASE_URL="https://api.labforge.cc/v1"
+
+`OPENAI_BASE_URL` 必须等于上述冻结值。模型 inventory 使用 `https://api.labforge.cc/v1/models`；所有生成任务使用 `https://api.labforge.cc/v1/chat/completions`。不得改用 `/responses`。
 
 外网访问失败时：
 
@@ -1275,9 +1319,7 @@ export ALL_PROXY=http://127.0.0.1:17897
 
 13.2 连接顺序
 
-直连 probe
-→ 失败后使用 127.0.0.1:17897
-→ 记录实际 route
+direct → `http://127.0.0.1:17897`。先做直连 probe；只有直连失败后才使用回环代理，并记录实际 route、endpoint、错误分类和每次尝试。两条路径均无进展时生成 stall report。
 
 代理不能永久硬编码到科学配置中。网络 route 属于运行环境 metadata。
 
@@ -1303,13 +1345,20 @@ primary_backbone_id: primary_gpt_5_6_sol
 replication_backbone_id: DAY1_FREEZE
 
 provider:
-  base_url_env: OPENAI_BASE_URL
+  base_url: https://api.labforge.cc/v1
   api_key_env: OPENAI_API_KEY
-  endpoint: responses
+  model_inventory_endpoint: /models
+  generation_endpoint: /chat/completions
+  request_protocol: openai_compatible_chat_completions
+  message_contract: exactly_one_user_message_no_system_or_developer
+  request_output_limit_field: max_tokens
+  max_route_attempts: 2
+  response_field: choices[0].message.content
+  usage_fields: [prompt_tokens, completion_tokens]
 
 leaf_constructor:
   model: gpt-5.6-sol
-  max_output_tokens: 512
+  max_tokens: 512
   temperature: 0
   seed: 0
 
@@ -1321,12 +1370,12 @@ merge:
 
 answer:
   model: gpt-5.6-sol
-  max_output_tokens: 512
+  max_tokens: 512
   temperature: 0
 
 judge:
   model: gpt-5.5
-  max_output_tokens: 128
+  max_tokens: 128
   temperature: 0
   cache_required: true
 
@@ -1476,7 +1525,7 @@ judge cache 已冻结
 
 judge repeatability 已通过
 
-API proxy 17897 已探活
+网络 probe 必须 direct-first；只有直连失败才记录 `proxy_17897`，两条路径失败即 stall
 
 hard cost cap 已生效
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import math
@@ -12,6 +13,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+
+from .hashing import stable_hash
 
 
 ARTIFACT_NAMES = (
@@ -25,9 +28,22 @@ ARTIFACT_NAMES = (
     "cost_upper_bound.json",
 )
 DEFAULT_BASE_URL = "https://api.labforge.cc/v1"
+CHAT_COMPLETIONS_PATH = "/chat/completions"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_HF_HUB_CACHE = REPOSITORY_ROOT / "cache" / "huggingface" / "hub"
 PRIMARY_MODEL = "gpt-5.6-sol"
 JUDGE_MODEL = "gpt-5.5"
+BGE_M3_MODEL = "BAAI/bge-m3"
+BGE_M3_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
+BGE_M3_EMBEDDING_DIMENSION = 1024
+BGE_M3_MAX_SEQUENCE_LENGTH = 8192
+EMBEDDING_PROBE_PACK_BUDGET_TOKENS = 4096
+HUGGINGFACE_PROBE_URL = "https://huggingface.co"
 PROXY_URL = "http://127.0.0.1:17897"
+DEFAULT_LONGMEMEVAL_RAW_PATH = Path("data/raw/longmemeval-cleaned/longmemeval_s_cleaned.json")
+DEFAULT_LONGMEMEVAL_NORMALIZED_PATH = Path("artifacts/longmemeval/normalized_episodes.json")
+DEFAULT_LONGMEMEVAL_MANIFEST_PATH = Path("artifacts/longmemeval/dataset_manifest.json")
+LONGMEMEVAL_CLEANED_FILENAME = "longmemeval_s_cleaned.json"
 PRIMARY_CONTEXT_SENTINEL_PREFIX = "PLAN_ROBUST_MEMORY_115K_END_SENTINEL"
 PRIMARY_CONCURRENCY_LEVELS = (1, 2, 4)
 PRIMARY_REQUIRED_SUCCESSES = 5
@@ -44,6 +60,14 @@ def _now() -> str:
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -67,15 +91,18 @@ def http_json_request(
     request = urllib.request.Request(url, data=body, method=method, headers=request_headers)
     started = time.monotonic()
     with opener.open(request, timeout=timeout) as response:
-        first_byte = response.read(1)
+        first_byte = b"" if method == "HEAD" else response.read(1)
         ttft_seconds = round(time.monotonic() - started, 3)
-        raw = first_byte + response.read()
+        raw = first_byte + (b"" if method == "HEAD" else response.read())
         status = int(getattr(response, "status", 200))
         response_headers = {key.lower(): value for key, value in response.headers.items()}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"non-JSON response status={status} body_hash={_sha256_bytes(raw)}") from exc
+    if method == "HEAD":
+        parsed: Any = {}
+    else:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"non-JSON response status={status} body_hash={_sha256_bytes(raw)}") from exc
     if not isinstance(parsed, dict):
         raise RuntimeError("JSON response must be an object")
     metadata = {
@@ -86,11 +113,18 @@ def http_json_request(
         "ttft_definition": "time_to_first_response_body_byte_non_streaming",
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "response_sha256": _sha256_bytes(raw),
+        "response_hash": _sha256_bytes(raw),
     }
     return parsed, metadata
 
 
 def _error_attempt(route: str, url: str, exc: Exception, elapsed: float) -> dict[str, Any]:
+    raw_error_body: bytes | None = None
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            raw_error_body = exc.read()
+        except Exception:
+            raw_error_body = None
     return {
         "route": route,
         "url": url,
@@ -99,6 +133,8 @@ def _error_attempt(route: str, url: str, exc: Exception, elapsed: float) -> dict
         "elapsed_seconds": round(elapsed, 3),
         "error_type": type(exc).__name__,
         "error": str(exc)[:500],
+        "response_hash": _sha256_bytes(raw_error_body) if raw_error_body is not None else None,
+        "response_body_bytes": len(raw_error_body) if raw_error_body is not None else None,
     }
 
 
@@ -126,6 +162,30 @@ def request_with_fallback(
     return None, attempts
 
 
+def probe_huggingface_connectivity(
+    *, request_fn: RequestFn = http_json_request, timeout: float = 15.0
+) -> dict[str, Any]:
+    response, attempts = request_with_fallback(
+        request_fn,
+        HUGGINGFACE_PROBE_URL,
+        method="HEAD",
+        timeout=timeout,
+    )
+    successful_route = None
+    if response is not None and attempts:
+        successful_route = attempts[-1].get("route")
+    return {
+        "schema_version": "plan-robust-memory.proxy-probe.v2",
+        "created_at": _now(),
+        "status": "passed" if response is not None else "blocked",
+        "target": HUGGINGFACE_PROBE_URL,
+        "proxy_url": PROXY_URL,
+        "attempt_order": ["direct", "proxy_17897"],
+        "successful_route": successful_route,
+        "attempts": attempts,
+    }
+
+
 def _usage(response: Mapping[str, Any] | None) -> dict[str, int | None]:
     usage = response.get("usage", {}) if isinstance(response, Mapping) else {}
     input_tokens = usage.get("input_tokens", usage.get("prompt_tokens")) if isinstance(usage, Mapping) else None
@@ -136,6 +196,13 @@ def _usage(response: Mapping[str, Any] | None) -> dict[str, int | None]:
 def _usage_available(response: Mapping[str, Any] | None) -> bool:
     usage = _usage(response)
     return usage["input_tokens"] is not None and usage["output_tokens"] is not None
+
+
+def _response_hash(attempt: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(attempt, Mapping):
+        return None
+    value = attempt.get("response_hash") or attempt.get("response_sha256")
+    return str(value) if isinstance(value, str) else None
 
 
 def _response_text(response: Mapping[str, Any] | None) -> str | None:
@@ -183,6 +250,24 @@ def _p95(values: Sequence[float]) -> float | None:
     return ordered[index]
 
 
+def _chat_payload(
+    *,
+    model: str,
+    user_content: str,
+    max_tokens: int,
+    temperature: int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": user_content}],
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    return payload
+
+
 def _model_probe(
     *,
     request_fn: RequestFn,
@@ -199,8 +284,19 @@ def _model_probe(
     last_response: Mapping[str, Any] | None = None
     all_attempts: list[dict[str, Any]] = []
     for index in range(repetitions):
-        payload = {"model": model, "input": input_text, "max_output_tokens": max_output_tokens, "stream": False}
-        response, attempts = request_with_fallback(request_fn, f"{base_url}/responses", method="POST", payload=payload, headers=headers, timeout=timeout)
+        payload = _chat_payload(
+            model=model,
+            user_content=input_text,
+            max_tokens=max_output_tokens,
+        )
+        response, attempts = request_with_fallback(
+            request_fn,
+            f"{base_url}{CHAT_COMPLETIONS_PATH}",
+            method="POST",
+            payload=payload,
+            headers=headers,
+            timeout=timeout,
+        )
         all_attempts.extend({**attempt, "call_index": index} for attempt in attempts)
         success = response is not None
         last_response = response or last_response
@@ -212,6 +308,8 @@ def _model_probe(
                 "requested_model": model,
                 "returned_model": response.get("model") if response else None,
                 "request_id": final_attempt.get("request_id"),
+                "route": final_attempt.get("route"),
+                "response_hash": _response_hash(final_attempt),
                 "usage": _usage(response),
                 "usage_available": _usage_available(response),
                 "ttft_seconds": final_attempt.get("ttft_seconds"),
@@ -232,6 +330,10 @@ def _model_probe(
         "requested_model": model,
         "returned_model": last_response.get("model") if last_response else None,
         "base_url": base_url,
+        "endpoint": f"{base_url}{CHAT_COMPLETIONS_PATH}",
+        "request_protocol": "openai_compatible_chat_completions",
+        "message_contract": "exactly_one_user_message_no_system_or_developer_message",
+        "requested_max_tokens": max_output_tokens,
         "max_output_tokens": max_output_tokens,
         "requested_input_token_target": 115000 if len(input_text) > 100000 else None,
         "success_count": successes,
@@ -263,9 +365,13 @@ def _primary_115k_call(
     )
     response, attempts = request_with_fallback(
         request_fn,
-        f"{base_url}/responses",
+        f"{base_url}{CHAT_COMPLETIONS_PATH}",
         method="POST",
-        payload={"model": PRIMARY_MODEL, "input": prompt, "max_output_tokens": 512, "stream": False},
+        payload=_chat_payload(
+            model=PRIMARY_MODEL,
+            user_content=prompt,
+            max_tokens=512,
+        ),
         headers=headers,
         timeout=timeout,
     )
@@ -302,6 +408,7 @@ def _primary_115k_call(
         "returned_model": returned_model,
         "model_match": model_match,
         "request_id": final_attempt.get("request_id"),
+        "response_hash": _response_hash(final_attempt),
         "usage": usage,
         "usage_available": usage_available,
         "input_tokens_in_target_range": input_tokens_in_range,
@@ -424,6 +531,9 @@ def _primary_115k_probe(
             {str(call["returned_model"]) for call in calls if call.get("returned_model")}
         ),
         "base_url": base_url,
+        "endpoint": f"{base_url}{CHAT_COMPLETIONS_PATH}",
+        "request_protocol": "openai_compatible_chat_completions",
+        "message_contract": "exactly_one_user_message_no_system_or_developer_message",
         "requested_input_token_target": PRIMARY_INPUT_TOKEN_TARGET,
         "requested_input_token_tolerance": PRIMARY_INPUT_TOKEN_TOLERANCE,
         "max_output_tokens": 512,
@@ -461,15 +571,14 @@ def _judge_probe(*, request_fn: RequestFn, base_url: str, headers: Mapping[str, 
     for case_id, prompt, expected in cases:
         response, rows = request_with_fallback(
             request_fn,
-            f"{base_url}/responses",
+            f"{base_url}{CHAT_COMPLETIONS_PATH}",
             method="POST",
-            payload={
-                "model": JUDGE_MODEL,
-                "input": prompt,
-                "max_output_tokens": 128,
-                "temperature": 0,
-                "stream": False,
-            },
+            payload=_chat_payload(
+                model=JUDGE_MODEL,
+                user_content=prompt,
+                max_tokens=128,
+                temperature=0,
+            ),
             headers=headers,
             timeout=timeout,
         )
@@ -510,6 +619,9 @@ def _judge_probe(*, request_fn: RequestFn, base_url: str, headers: Mapping[str, 
                 ),
                 "returned_model": returned_model,
                 "model_match": model_match,
+                "route": rows[-1].get("route") if rows else None,
+                "request_id": rows[-1].get("request_id") if rows else None,
+                "response_hash": _response_hash(rows[-1] if rows else None),
                 "usage": usage,
                 "usage_available": usage_available,
             }
@@ -530,8 +642,10 @@ def _judge_probe(*, request_fn: RequestFn, base_url: str, headers: Mapping[str, 
         "returned_model": returned_models[0] if len(returned_models) == 1 else None,
         "returned_models": returned_models,
         "base_url": base_url,
-        "endpoint": f"{base_url}/responses",
-        "decoding_parameters": {"temperature": 0, "max_output_tokens": 128, "stream": False},
+        "endpoint": f"{base_url}{CHAT_COMPLETIONS_PATH}",
+        "request_protocol": "openai_compatible_chat_completions",
+        "message_contract": "exactly_one_user_message_no_system_or_developer_message",
+        "decoding_parameters": {"temperature": 0, "max_tokens": 128, "stream": False},
         "case_count": len(cases),
         "parser_success_count": parser_success_count,
         "parser_success_rate": parser_success_rate,
@@ -542,6 +656,271 @@ def _judge_probe(*, request_fn: RequestFn, base_url: str, headers: Mapping[str, 
         ),
         "cases": outputs,
         "attempts": attempts,
+    }
+
+
+def _session_turn_text(session: Any) -> list[str]:
+    if not isinstance(session, Sequence) or isinstance(session, (str, bytes)):
+        raise ValueError("LongMemEval haystack session must be a list of turns")
+    turns: list[str] = []
+    for turn in session:
+        if not isinstance(turn, Mapping):
+            raise ValueError("LongMemEval session turn must be an object")
+        role = str(turn.get("role", "unknown"))
+        content = turn.get("content", "")
+        turns.append(f"{role}: {content}")
+    if not turns:
+        raise ValueError("LongMemEval haystack session must contain at least one turn")
+    return turns
+
+
+def _episode_unit_text(timestamp: Any, turns: Sequence[str]) -> str:
+    timestamp_text = str(timestamp) if timestamp is not None else "unknown-time"
+    return f"timestamp: {timestamp_text}\n" + "\n".join(str(turn) for turn in turns)
+
+
+def _read_json_file(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"required Day 1 episode source is missing: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON in Day 1 episode source: {path}") from exc
+
+
+def _default_weight_resolver(
+    model: str,
+    revision: str | None,
+    *,
+    cache_dir: Path = DEFAULT_HF_HUB_CACHE,
+) -> dict[str, Any]:
+    if not _explicit_revision(revision):
+        raise ValueError("an explicit model revision is required to resolve embedding weights")
+    filename = "pytorch_model.bin"
+    try:
+        from huggingface_hub import hf_hub_download
+
+        path = Path(
+            hf_hub_download(
+                repo_id=model,
+                filename=filename,
+                revision=revision,
+                cache_dir=str(cache_dir),
+                local_files_only=True,
+            )
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not resolve frozen official embedding weight {model}@{revision}/{filename}"
+        ) from exc
+    return {
+        "weight_filename": filename,
+        "weight_sha256": _sha256_file(path),
+        "cache_dir": str(cache_dir.resolve()),
+        "cache_hit_offline": True,
+        "resolved_path": str(path.resolve()),
+    }
+
+
+def _choose_real_probe_episode(
+    normalized: Sequence[Mapping[str, Any]],
+    manifest: Mapping[str, Any] | None,
+    *,
+    split: str,
+    candidate_id: str,
+) -> Mapping[str, Any]:
+    by_id = {
+        str(row.get("episode_id")): row
+        for row in normalized
+        if isinstance(row, Mapping) and row.get("episode_id")
+    }
+    if manifest is not None:
+        candidates = next(
+            (
+                candidate
+                for candidate in manifest.get("split_candidates", [])
+                if isinstance(candidate, Mapping) and candidate.get("candidate_id") == candidate_id
+            ),
+            None,
+        )
+        if isinstance(candidates, Mapping):
+            episode_ids = sorted(
+                episode_id
+                for assignment in candidates.get("assignments", [])
+                if isinstance(assignment, Mapping) and assignment.get("split") == split
+                for episode_id in assignment.get("episode_ids", [])
+                if str(episode_id) in by_id
+                and bool(by_id[str(episode_id)].get("primary_eligible"))
+                and bool(by_id[str(episode_id)].get("eligible_for_k8"))
+            )
+            if episode_ids:
+                return by_id[episode_ids[0]]
+        raise ValueError(
+            f"split manifest has no primary k=8 {split} episode for candidate {candidate_id}"
+        )
+    fallback = sorted(
+        (
+            row
+            for row in normalized
+            if bool(row.get("primary_eligible")) and bool(row.get("eligible_for_k8"))
+        ),
+        key=lambda row: str(row.get("episode_id")),
+    )
+    if not fallback:
+        raise ValueError("normalized LongMemEval artifact has no primary k=8 episode")
+    return fallback[0]
+
+
+def load_real_episode_probe(
+    *,
+    raw_path: Path = DEFAULT_LONGMEMEVAL_RAW_PATH,
+    normalized_path: Path = DEFAULT_LONGMEMEVAL_NORMALIZED_PATH,
+    manifest_path: Path | None = DEFAULT_LONGMEMEVAL_MANIFEST_PATH,
+    episode_id: str | None = None,
+    split: str = "development",
+    candidate_id: str = "20_30_50",
+) -> dict[str, Any]:
+    """Load one deterministic primary LongMemEval episode for the embedding Gate.
+
+    The normalized audit supplies the immutable evidence order and surrogate token
+    accounting; the official cleaned raw row supplies every timestamped session
+    body.  No answer/support labels are returned to the encoder.
+    """
+    raw_path = Path(raw_path).resolve()
+    normalized_path = Path(normalized_path).resolve()
+    if not raw_path.exists() or not normalized_path.exists():
+        missing = [str(path) for path in (raw_path, normalized_path) if not path.exists()]
+        raise FileNotFoundError("missing official LongMemEval probe source: " + ", ".join(missing))
+    raw_rows = _read_json_file(raw_path)
+    normalized_rows = _read_json_file(normalized_path)
+    if not isinstance(raw_rows, list) or not all(isinstance(row, Mapping) for row in raw_rows):
+        raise ValueError("cleaned LongMemEval raw source must be a JSON array of objects")
+    if not isinstance(normalized_rows, list) or not all(isinstance(row, Mapping) for row in normalized_rows):
+        raise ValueError("normalized LongMemEval source must be a JSON array of objects")
+    manifest: Mapping[str, Any] | None = None
+    if manifest_path is not None:
+        resolved_manifest_path = Path(manifest_path).resolve()
+        if not resolved_manifest_path.exists():
+            raise FileNotFoundError(
+                f"required LongMemEval split manifest is missing: {resolved_manifest_path}"
+            )
+        loaded_manifest = _read_json_file(resolved_manifest_path)
+        if not isinstance(loaded_manifest, Mapping):
+            raise ValueError("LongMemEval dataset manifest must be an object")
+        manifest = loaded_manifest
+        audit_hash = manifest.get("audit_hash")
+        if not isinstance(audit_hash, str) or audit_hash != stable_hash(
+            {key: value for key, value in manifest.items() if key != "audit_hash"}
+        ):
+            raise ValueError("LongMemEval split manifest audit hash is invalid")
+    elif episode_id is None:
+        raise ValueError("a split manifest is required unless an explicit fixture episode is selected")
+    raw_sha256 = _sha256_file(raw_path)
+    if manifest is not None:
+        raw_checksums = manifest.get("raw_checksums")
+        checksum_row = (
+            raw_checksums.get(LONGMEMEVAL_CLEANED_FILENAME)
+            if isinstance(raw_checksums, Mapping)
+            else None
+        )
+        expected_raw_sha256 = (
+            checksum_row.get("sha256") if isinstance(checksum_row, Mapping) else None
+        )
+        if expected_raw_sha256 != raw_sha256:
+            raise ValueError(
+                "official LongMemEval raw checksum does not match the audited split manifest"
+            )
+    normalized = (
+        next((row for row in normalized_rows if str(row.get("episode_id")) == episode_id), None)
+        if episode_id is not None
+        else _choose_real_probe_episode(
+            normalized_rows, manifest, split=split, candidate_id=candidate_id
+        )
+    )
+    if not isinstance(normalized, Mapping):
+        raise ValueError(f"normalized LongMemEval episode not found: {episode_id}")
+    if manifest is not None and normalized.get("dataset_version_or_commit") != manifest.get(
+        "source_revision"
+    ):
+        raise ValueError("normalized episode revision does not match the audited split manifest")
+    selected_id = str(normalized.get("episode_id"))
+    raw = next((row for row in raw_rows if str(row.get("question_id")) == selected_id), None)
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"official cleaned raw episode not found: {selected_id}")
+    dates = raw.get("haystack_dates")
+    source_ids = raw.get("haystack_session_ids")
+    sessions = raw.get("haystack_sessions")
+    evidence = normalized.get("evidence")
+    if not (
+        isinstance(dates, list)
+        and isinstance(source_ids, list)
+        and isinstance(sessions, list)
+        and isinstance(evidence, list)
+        and len(dates) == len(source_ids) == len(sessions) == len(evidence)
+        and len(sessions) > 0
+    ):
+        raise ValueError(f"raw/normalized evidence cardinality mismatch for {selected_id}")
+    units: list[dict[str, Any]] = []
+    for sequence_index, (date, source_id, session, evidence_row) in enumerate(
+        zip(dates, source_ids, sessions, evidence, strict=True)
+    ):
+        if not isinstance(evidence_row, Mapping):
+            raise ValueError(f"invalid normalized evidence row for {selected_id}:{sequence_index}")
+        if evidence_row.get("sequence_index") != sequence_index:
+            raise ValueError(
+                f"normalized evidence sequence index mismatch for {selected_id}:{sequence_index}"
+            )
+        if evidence_row.get("source_session_id") is not None and str(
+            evidence_row.get("source_session_id")
+        ) != str(source_id):
+            raise ValueError(
+                f"normalized evidence source session mismatch for {selected_id}:{sequence_index}"
+            )
+        expected_session_hash = stable_hash(session)
+        if evidence_row.get("raw_sha256") is not None and evidence_row.get(
+            "raw_sha256"
+        ) != expected_session_hash:
+            raise ValueError(
+                f"normalized evidence hash mismatch for {selected_id}:{sequence_index}"
+            )
+        turns = _session_turn_text(session)
+        unit = {
+            "sequence_index": sequence_index,
+            "source_session_id": str(source_id),
+            "evidence_id": str(evidence_row.get("evidence_id")),
+            "timestamp": str(date),
+            "turns": turns,
+            "text": _episode_unit_text(date, turns),
+            "surrogate_token_count": int(evidence_row.get("token_count", 0)),
+        }
+        if unit["surrogate_token_count"] <= 0:
+            raise ValueError(f"non-positive normalized token count for {selected_id}:{sequence_index}")
+        units.append(unit)
+    normalized_hash = _sha256_bytes(
+        json.dumps(dict(normalized), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    return {
+        "episode_id": selected_id,
+        "question_type": str(normalized.get("question_type")),
+        "dataset_revision": str(normalized.get("dataset_version_or_commit")),
+        "raw_path": str(raw_path),
+        "raw_sha256": raw_sha256,
+        "normalized_path": str(normalized_path),
+        "normalized_episode_sha256": normalized_hash,
+        "session_count": len(units),
+        "unit_count": len(units),
+        "surrogate_token_count": sum(int(unit["surrogate_token_count"]) for unit in units),
+        "max_unit_surrogate_tokens": max(int(unit["surrogate_token_count"]) for unit in units),
+        "query_text": str(raw.get("question") or normalized.get("query", {}).get("question_text", "")),
+        "units": units,
+        "selection": {
+            "split": split if episode_id is None else "explicit_fixture",
+            "candidate_id": candidate_id if episode_id is None else None,
+            "explicit_episode_id": episode_id,
+            "manifest_audit_hash": manifest.get("audit_hash") if manifest is not None else None,
+        },
     }
 
 
@@ -558,6 +937,22 @@ def _vectors_as_lists(value: Any) -> list[list[float]]:
     if not matrix or not matrix[0] or any(len(row) != len(matrix[0]) for row in matrix):
         raise ValueError("embedding matrix must be non-empty and rectangular")
     return matrix
+
+
+def _embedding_matrix_sha256(matrix: Sequence[Sequence[float]]) -> str:
+    encoded = json.dumps(
+        [[float(value) for value in row] for row in matrix],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return _sha256_bytes(encoded)
+
+
+def _package_version(distribution: str) -> str | None:
+    try:
+        return importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
@@ -579,17 +974,30 @@ def _rank_documents(document_vectors: Sequence[Sequence[float]], query_vectors: 
     ]
 
 
-def _greedy_pack(rankings: Sequence[Sequence[int]], documents: Sequence[str], budget_tokens: int = 12) -> list[list[int]]:
+def _greedy_pack(
+    rankings: Sequence[Sequence[int]],
+    documents: Sequence[str],
+    budget_tokens: int = EMBEDDING_PROBE_PACK_BUDGET_TOKENS,
+    *,
+    token_counts: Sequence[int] | None = None,
+) -> list[list[int]]:
+    counts = (
+        [max(1, len(document.split())) for document in documents]
+        if token_counts is None
+        else [int(value) for value in token_counts]
+    )
+    if len(counts) != len(documents) or any(value <= 0 for value in counts):
+        raise ValueError("packing token counts must be positive and match the documents")
     packed: list[list[int]] = []
     for ranking in rankings:
         remaining = budget_tokens
         selected: list[int] = []
         for index in ranking:
-            token_estimate = max(1, len(documents[index].split()))
+            token_estimate = counts[index]
             if token_estimate <= remaining:
                 selected.append(index)
                 remaining -= token_estimate
-        packed.append(selected)
+        packed.append(sorted(selected))
     return packed
 
 
@@ -597,12 +1005,116 @@ def _explicit_revision(revision: str | None) -> bool:
     return bool(revision and revision.strip().lower() not in {"main", "master", "latest"})
 
 
+def _model_token_count(tokenizer: Any, text: str) -> int:
+    if tokenizer is not None:
+        encoded = tokenizer(text, add_special_tokens=True, truncation=False)
+        input_ids = encoded.get("input_ids") if isinstance(encoded, Mapping) else None
+        if hasattr(input_ids, "tolist"):
+            input_ids = input_ids.tolist()
+        if isinstance(input_ids, Sequence) and input_ids and isinstance(input_ids[0], Sequence):
+            input_ids = input_ids[0]
+        if isinstance(input_ids, Sequence) and not isinstance(input_ids, (str, bytes)):
+            return len(input_ids)
+    # This fallback is deliberately conservative and is only used by injected
+    # test encoders that do not expose a tokenizer.
+    return max(1, len(text.split()))
+
+
+def _split_episode_unit_for_model(
+    unit: Mapping[str, Any], *, tokenizer: Any, max_sequence_length: int
+) -> list[dict[str, Any]]:
+    text = str(unit["text"])
+    if _model_token_count(tokenizer, text) <= max_sequence_length:
+        return [dict(unit, model_token_count=_model_token_count(tokenizer, text), chunk_index=0)]
+    turns = [str(turn) for turn in unit.get("turns", [])]
+    timestamp = str(unit.get("timestamp", "unknown-time"))
+    chunks: list[str] = []
+    current: list[str] = []
+    for turn in turns:
+        candidate = _episode_unit_text(timestamp, [*current, turn])
+        if current and _model_token_count(tokenizer, candidate) > max_sequence_length:
+            chunks.append(_episode_unit_text(timestamp, current))
+            current = [turn]
+            if _model_token_count(tokenizer, _episode_unit_text(timestamp, current)) <= max_sequence_length:
+                continue
+            current = []
+        if not current and _model_token_count(tokenizer, _episode_unit_text(timestamp, [turn])) > max_sequence_length:
+            words = turn.split()
+            word_chunk: list[str] = []
+            for word in words:
+                candidate_words = " ".join([*word_chunk, word])
+                if word_chunk and _model_token_count(tokenizer, _episode_unit_text(timestamp, [candidate_words])) > max_sequence_length:
+                    chunks.append(_episode_unit_text(timestamp, [" ".join(word_chunk)]))
+                    word_chunk = [word]
+                else:
+                    word_chunk.append(word)
+            if word_chunk:
+                current = [" ".join(word_chunk)]
+            continue
+        current.append(turn)
+    if current:
+        chunks.append(_episode_unit_text(timestamp, current))
+    if not chunks:
+        raise ValueError(f"unable to split episode unit {unit.get('sequence_index')}")
+    total_surrogate = int(unit["surrogate_token_count"])
+    model_counts = [_model_token_count(tokenizer, chunk) for chunk in chunks]
+    if any(count > max_sequence_length for count in model_counts):
+        raise ValueError(
+            f"episode unit {unit.get('sequence_index')} remains above model limit {max_sequence_length}"
+        )
+    # Preserve the normalized episode total while making the chunk allocation
+    # auditable and deterministic.
+    weights = [max(1, count) for count in model_counts]
+    allocated: list[int] = []
+    remaining = total_surrogate
+    for index, weight in enumerate(weights):
+        if index == len(weights) - 1:
+            value = remaining
+        else:
+            value = max(1, round(total_surrogate * weight / sum(weights)))
+            value = min(value, remaining - (len(weights) - index - 1))
+        allocated.append(value)
+        remaining -= value
+    return [
+        {
+            **dict(unit),
+            "text": chunk,
+            "chunk_index": chunk_index,
+            "model_token_count": model_counts[chunk_index],
+            "surrogate_token_count": allocated[chunk_index],
+            "evidence_id": f"{unit['evidence_id']}:chunk:{chunk_index:03d}",
+        }
+        for chunk_index, chunk in enumerate(chunks)
+    ]
+
+
+def _prepare_episode_units(
+    episode_probe: Mapping[str, Any], *, tokenizer: Any, max_sequence_length: int
+) -> list[dict[str, Any]]:
+    raw_units = episode_probe.get("units")
+    if not isinstance(raw_units, Sequence) or isinstance(raw_units, (str, bytes)) or not raw_units:
+        raise ValueError("real episode probe must contain non-empty ordered units")
+    prepared: list[dict[str, Any]] = []
+    for unit in raw_units:
+        if not isinstance(unit, Mapping):
+            raise ValueError("real episode probe unit must be an object")
+        prepared.extend(
+            _split_episode_unit_for_model(
+                unit, tokenizer=tokenizer, max_sequence_length=max_sequence_length
+            )
+        )
+    return prepared
+
+
 def probe_embedding(
-    model: str = "BAAI/bge-m3",
-    revision: str | None = None,
+    model: str = BGE_M3_MODEL,
+    revision: str | None = BGE_M3_REVISION,
     *,
     torch_module: Any | None = None,
     sentence_transformer_cls: Any | None = None,
+    episode_probe: Mapping[str, Any] | None = None,
+    weight_resolver: Callable[[str, str | None], Mapping[str, Any]] = _default_weight_resolver,
+    hf_cache_dir: Path = DEFAULT_HF_HUB_CACHE,
 ) -> dict[str, Any]:
     torch_available = torch_module is not None or importlib.util.find_spec("torch") is not None
     sentence_transformers_available = (
@@ -616,17 +1128,58 @@ def probe_embedding(
         "model": model,
         "revision": revision,
         "tokenizer_revision": revision if _explicit_revision(revision) else None,
+        "model_snapshot": f"{model}@{revision}" if _explicit_revision(revision) else None,
+        "tokenizer_snapshot": f"{model}@{revision}" if _explicit_revision(revision) else None,
+        "precision": "fp16",
+        "similarity": "cosine_over_normalized_vectors",
+        "normalize_embeddings": True,
+        "trust_remote_code": False,
+        "use_safetensors": False,
+        "hf_cache_dir": str(Path(hf_cache_dir).resolve()),
+        "hf_cache_policy": "repo_local_offline_frozen_snapshot",
+        "hf_cache_hit_offline": None,
+        "resolved_weight_path": None,
+        "weight_filename": None,
+        "weight_sha256": None,
+        "expected_embedding_dimension": BGE_M3_EMBEDDING_DIMENSION,
+        "expected_max_sequence_length": BGE_M3_MAX_SEQUENCE_LENGTH,
         "torch_available": torch_available,
         "sentence_transformers_available": sentence_transformers_available,
+        "torch_version": None,
+        "sentence_transformers_version": None,
+        "cuda_runtime_version": None,
         "cuda_available": False,
         "device_name": None,
         "vram_bytes": None,
+        "model_parameter_dtype": None,
+        "embedding_dimension": None,
+        "normalized_vectors_verified": False,
+        "embedding_output_sha256_runs": [],
         "embedding_executed": False,
         "encode_run_count": 0,
+        "real_episode_probe": False,
+        "episode_id": None,
+        "episode_selection": None,
+        "question_type": None,
+        "dataset_revision": None,
+        "raw_sha256": None,
+        "normalized_episode_sha256": None,
+        "session_count": None,
+        "episode_unit_count": None,
+        "surrogate_token_count": None,
+        "max_unit_surrogate_tokens": None,
+        "max_unit_model_tokens": None,
+        "episode_batch_size": None,
+        "peak_vram_bytes": None,
+        "peak_vram_bytes_available": False,
         "ranking_deterministic": False,
         "packing_deterministic": False,
+        "packing_nonempty": False,
+        "packing_budget_tokens": EMBEDDING_PROBE_PACK_BUDGET_TOKENS,
+        "packing_token_totals_runs": [],
         "single_episode_embedding_latency_seconds": None,
         "estimated_500_instance_index_seconds": None,
+        "micro_probe_latency_seconds": None,
         "ranking_runs": [],
         "packing_runs": [],
         "blocking_reason": None,
@@ -647,6 +1200,10 @@ def probe_embedding(
             import torch as imported_torch
 
             torch_module = imported_torch
+        artifact["torch_version"] = str(getattr(torch_module, "__version__", "unknown"))
+        artifact["cuda_runtime_version"] = str(
+            getattr(getattr(torch_module, "version", None), "cuda", "unknown")
+        )
         cuda_available = bool(torch_module.cuda.is_available())
         artifact["cuda_available"] = cuda_available
         if not cuda_available:
@@ -663,50 +1220,207 @@ def probe_embedding(
             from sentence_transformers import SentenceTransformer
 
             sentence_transformer_cls = SentenceTransformer
-        encoder = sentence_transformer_cls(model, revision=revision, device="cuda")
-        documents = [
-            "alpha project deadline is Monday",
-            "beta recipe uses basil and garlic",
-            "alpha meeting moved to Tuesday",
-            "beta travel reservation is Friday",
-        ]
-        queries = ["alpha project schedule", "beta recipe and travel"]
+        artifact["sentence_transformers_version"] = str(
+            getattr(sentence_transformer_cls, "package_version", None)
+            or _package_version("sentence-transformers")
+            or "unknown"
+        )
+        if weight_resolver is _default_weight_resolver:
+            weight_record = weight_resolver(
+                model,
+                revision,
+                cache_dir=Path(hf_cache_dir),
+            )
+        else:
+            weight_record = weight_resolver(model, revision)
+        artifact["weight_filename"] = weight_record.get("weight_filename")
+        artifact["weight_sha256"] = weight_record.get("weight_sha256")
+        artifact["hf_cache_hit_offline"] = weight_record.get("cache_hit_offline")
+        artifact["resolved_weight_path"] = weight_record.get("resolved_path")
+        if artifact["weight_filename"] != "pytorch_model.bin" or not (
+            isinstance(artifact["weight_sha256"], str)
+            and len(artifact["weight_sha256"]) == 64
+        ):
+            raise ValueError("frozen official pytorch_model.bin weight provenance is required")
+        encoder = sentence_transformer_cls(
+            model,
+            cache_folder=str(Path(hf_cache_dir).resolve()),
+            revision=revision,
+            device="cuda",
+            trust_remote_code=False,
+            local_files_only=True,
+            model_kwargs={
+                "torch_dtype": torch_module.float16,
+                "use_safetensors": False,
+            },
+            tokenizer_kwargs={"local_files_only": True},
+            config_kwargs={"local_files_only": True},
+        )
+        try:
+            first_parameter = next(iter(encoder.parameters()))
+            artifact["model_parameter_dtype"] = str(first_parameter.dtype)
+        except (AttributeError, StopIteration, TypeError):
+            artifact["model_parameter_dtype"] = None
+        tokenizer = getattr(encoder, "tokenizer", None)
+        if tokenizer is None:
+            try:
+                tokenizer = getattr(encoder._first_module(), "tokenizer", None)
+            except (AttributeError, TypeError):
+                tokenizer = None
+        model_max_sequence_length = min(
+            BGE_M3_MAX_SEQUENCE_LENGTH,
+            int(getattr(encoder, "max_seq_length", BGE_M3_MAX_SEQUENCE_LENGTH)),
+        )
+        real_episode = episode_probe is not None
+        if real_episode:
+            prepared_units = _prepare_episode_units(
+                episode_probe,
+                tokenizer=tokenizer,
+                max_sequence_length=model_max_sequence_length,
+            )
+            documents = [str(unit["text"]) for unit in prepared_units]
+            document_token_counts = [
+                int(unit["surrogate_token_count"]) for unit in prepared_units
+            ]
+            queries = [str(episode_probe.get("query_text", ""))]
+            if not queries[0].strip():
+                raise ValueError("real episode probe query is empty")
+            artifact.update(
+                {
+                    "real_episode_probe": True,
+                    "episode_id": str(episode_probe.get("episode_id")),
+                    "episode_selection": episode_probe.get("selection"),
+                    "question_type": episode_probe.get("question_type"),
+                    "dataset_revision": episode_probe.get("dataset_revision"),
+                    "raw_sha256": episode_probe.get("raw_sha256"),
+                    "normalized_episode_sha256": episode_probe.get("normalized_episode_sha256"),
+                    "session_count": int(episode_probe.get("session_count", len(prepared_units))),
+                    "episode_unit_count": len(prepared_units),
+                    "surrogate_token_count": sum(
+                        int(unit["surrogate_token_count"]) for unit in prepared_units
+                    ),
+                    "max_unit_surrogate_tokens": max(
+                        int(unit["surrogate_token_count"]) for unit in prepared_units
+                    ),
+                    "max_unit_model_tokens": max(
+                        int(unit.get("model_token_count", _model_token_count(tokenizer, str(unit["text"]))))
+                        for unit in prepared_units
+                    ),
+                    "episode_batch_size": 1,
+                }
+            )
+        else:
+            documents = [
+                "alpha project deadline is Monday",
+                "beta recipe uses basil and garlic",
+                "alpha meeting moved to Tuesday",
+                "beta travel reservation is Friday",
+            ]
+            document_token_counts = [max(1, len(document.split())) for document in documents]
+            queries = ["alpha project schedule", "beta recipe and travel"]
         texts = documents + queries
         ranking_runs: list[list[list[int]]] = []
         packing_runs: list[list[list[int]]] = []
+        output_hashes: list[str] = []
         latencies: list[float] = []
+        peak_vram_values: list[int] = []
         for _ in range(2):
+            if real_episode and hasattr(torch_module.cuda, "reset_peak_memory_stats"):
+                torch_module.cuda.reset_peak_memory_stats()
             started = time.monotonic()
             vectors = _vectors_as_lists(
                 encoder.encode(
                     texts,
-                    batch_size=len(texts),
+                    batch_size=1 if real_episode else len(texts),
                     normalize_embeddings=True,
                     convert_to_numpy=True,
                     show_progress_bar=False,
                 )
             )
             latencies.append(time.monotonic() - started)
+            if real_episode:
+                peak_value = None
+                for name in ("max_memory_reserved", "max_memory_allocated"):
+                    method = getattr(torch_module.cuda, name, None)
+                    if callable(method):
+                        try:
+                            peak_value = max(int(method()), int(peak_value or 0))
+                        except (RuntimeError, TypeError, ValueError):
+                            pass
+                if peak_value is None:
+                    peak_value = artifact.get("vram_bytes")
+                if isinstance(peak_value, int):
+                    peak_vram_values.append(peak_value)
             if len(vectors) != len(texts):
                 raise ValueError("embedding output row count does not match probe text count")
+            dimension = len(vectors[0])
+            if any(len(vector) != dimension for vector in vectors):
+                raise ValueError("embedding output dimensions differ across probe texts")
+            artifact["embedding_dimension"] = dimension
+            output_hashes.append(_embedding_matrix_sha256(vectors))
             rankings = _rank_documents(vectors[: len(documents)], vectors[len(documents) :])
             ranking_runs.append(rankings)
-            packing_runs.append(_greedy_pack(rankings, documents))
+            packing_runs.append(
+                _greedy_pack(
+                    rankings,
+                    documents,
+                    token_counts=document_token_counts,
+                )
+            )
         artifact["embedding_executed"] = True
         artifact["encode_run_count"] = 2
         artifact["ranking_runs"] = ranking_runs
         artifact["packing_runs"] = packing_runs
+        artifact["packing_token_totals_runs"] = [
+            [sum(document_token_counts[index] for index in selected) for selected in run]
+            for run in packing_runs
+        ]
+        artifact["embedding_output_sha256_runs"] = output_hashes
+        artifact["normalized_vectors_verified"] = all(
+            math.isclose(
+                math.sqrt(sum(value * value for value in vector)),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=5e-3,
+            )
+            for vector in vectors
+        )
         artifact["ranking_deterministic"] = ranking_runs[0] == ranking_runs[1]
         artifact["packing_deterministic"] = packing_runs[0] == packing_runs[1]
-        artifact["single_episode_embedding_latency_seconds"] = round(sum(latencies) / len(latencies), 6)
-        artifact["estimated_500_instance_index_seconds"] = round(
-            artifact["single_episode_embedding_latency_seconds"] * 500,
-            3,
+        artifact["packing_nonempty"] = all(
+            bool(selected) for run in packing_runs for selected in run
         )
-        if artifact["ranking_deterministic"] and artifact["packing_deterministic"]:
-            artifact["status"] = "passed"
+        artifact["micro_probe_latency_seconds"] = round(sum(latencies) / len(latencies), 6)
+        if real_episode:
+            artifact["single_episode_embedding_latency_seconds"] = artifact[
+                "micro_probe_latency_seconds"
+            ]
+            artifact["estimated_500_instance_index_seconds"] = round(
+                artifact["micro_probe_latency_seconds"] * 500, 3
+            )
+            if peak_vram_values:
+                artifact["peak_vram_bytes"] = max(peak_vram_values)
+                artifact["peak_vram_bytes_available"] = True
+        if (
+            artifact["ranking_deterministic"]
+            and artifact["packing_deterministic"]
+            and artifact["packing_nonempty"]
+            and all(
+                total <= EMBEDDING_PROBE_PACK_BUDGET_TOKENS
+                for run in artifact["packing_token_totals_runs"]
+                for total in run
+            )
+            and len(set(output_hashes)) == 1
+            and artifact["embedding_dimension"] == BGE_M3_EMBEDDING_DIMENSION
+            and artifact["normalized_vectors_verified"] is True
+            and artifact["model_parameter_dtype"] == "torch.float16"
+        ):
+            artifact["status"] = "passed" if real_episode else "diagnostic_only"
         else:
-            artifact["blocking_reason"] = "query ranking or greedy packing changed across repeated encodes"
+            artifact["blocking_reason"] = (
+                "fp16 dtype, 1024-dimensional normalized embeddings, repeated output bytes, "
+                "query ranking, and greedy packing must all qualify"
+            )
     except Exception as exc:
         artifact["blocking_reason"] = f"embedding execution failed: {type(exc).__name__}: {str(exc)[:500]}"
     return artifact
@@ -721,15 +1435,83 @@ def _embedding_qualified(artifact: Mapping[str, Any]) -> bool:
         and _explicit_revision(revision)
         and isinstance(tokenizer_revision, str)
         and _explicit_revision(tokenizer_revision)
+        and artifact.get("model_snapshot") == f"{artifact.get('model')}@{revision}"
+        and artifact.get("tokenizer_snapshot") == f"{artifact.get('model')}@{tokenizer_revision}"
+        and artifact.get("precision") == "fp16"
+        and artifact.get("similarity") == "cosine_over_normalized_vectors"
+        and artifact.get("use_safetensors") is False
+        and artifact.get("weight_filename") == "pytorch_model.bin"
+        and isinstance(artifact.get("weight_sha256"), str)
+        and len(artifact.get("weight_sha256", "")) == 64
+        and isinstance(artifact.get("torch_version"), str)
+        and bool(artifact.get("torch_version"))
+        and isinstance(artifact.get("sentence_transformers_version"), str)
+        and bool(artifact.get("sentence_transformers_version"))
+        and isinstance(artifact.get("cuda_runtime_version"), str)
+        and bool(artifact.get("cuda_runtime_version"))
+        and artifact.get("cuda_available") is True
+        and isinstance(artifact.get("device_name"), str)
+        and artifact.get("model_parameter_dtype") == "torch.float16"
+        and artifact.get("embedding_dimension") == BGE_M3_EMBEDDING_DIMENSION
+        and artifact.get("normalized_vectors_verified") is True
+        and isinstance(artifact.get("embedding_output_sha256_runs"), list)
+        and len(artifact.get("embedding_output_sha256_runs", [])) >= 2
+        and len(set(artifact.get("embedding_output_sha256_runs", []))) == 1
         and artifact.get("embedding_executed") is True
         and int(artifact.get("encode_run_count", 0)) >= 2
+        and artifact.get("real_episode_probe") is True
+        and isinstance(artifact.get("episode_id"), str)
+        and bool(artifact.get("episode_id"))
+        and isinstance(artifact.get("episode_selection"), Mapping)
+        and artifact.get("episode_selection", {}).get("split") == "development"
+        and artifact.get("episode_selection", {}).get("candidate_id") == "20_30_50"
+        and isinstance(
+            artifact.get("episode_selection", {}).get("manifest_audit_hash"), str
+        )
+        and len(artifact.get("episode_selection", {}).get("manifest_audit_hash", "")) == 64
+        and isinstance(artifact.get("raw_sha256"), str)
+        and len(artifact.get("raw_sha256", "")) == 64
+        and isinstance(artifact.get("normalized_episode_sha256"), str)
+        and len(artifact.get("normalized_episode_sha256", "")) == 64
+        and int(artifact.get("session_count", 0)) > 0
+        and int(artifact.get("episode_unit_count", 0)) > 0
+        and int(artifact.get("episode_batch_size", 0)) == 1
+        and artifact.get("single_episode_embedding_latency_seconds") is not None
+        and artifact.get("peak_vram_bytes") is not None
         and artifact.get("ranking_deterministic") is True
         and artifact.get("packing_deterministic") is True
+        and artifact.get("packing_nonempty") is True
+        and int(artifact.get("packing_budget_tokens", 0)) > 0
+        and all(
+            isinstance(total, (int, float))
+            and not isinstance(total, bool)
+            and 0 < total <= int(artifact.get("packing_budget_tokens", 0))
+            for run in artifact.get("packing_token_totals_runs", [])
+            if isinstance(run, Sequence) and not isinstance(run, (str, bytes))
+            for total in run
+        )
+        and bool(artifact.get("packing_token_totals_runs"))
     )
 
 
-def _blocked_artifact(role: str, base_url: str, reason: str, attempts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    return {"schema_version": "plan-robust-memory.day1-probe.v1", "created_at": _now(), "status": "blocked", "role": role, "base_url": base_url, "blocking_reason": reason, "attempts": attempts or []}
+def _blocked_artifact(
+    role: str,
+    base_url: str,
+    reason: str,
+    attempts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "plan-robust-memory.day1-probe.v1",
+        "created_at": _now(),
+        "status": "blocked",
+        "role": role,
+        "base_url": base_url,
+        "endpoint": f"{base_url}{CHAT_COMPLETIONS_PATH}",
+        "request_protocol": "openai_compatible_chat_completions",
+        "message_contract": "exactly_one_user_message_no_system_or_developer_message",
+        "blocking_reason": reason,
+        "attempts": attempts or [],
+    }
 
 
 def _probe_only_bound() -> dict[str, Any]:
@@ -928,6 +1710,18 @@ def _write_stall_report(output_dir: Path, artifacts: Mapping[str, Mapping[str, A
         }
     )
     root_cause = _stall_root_cause(artifacts)
+    embedding_passed = artifacts.get("embedding_probe.json", {}).get("status") == "passed"
+    candidate_paths = [
+        "Resolve the provider/edge HTTP 400 or credential authorization scope, then rerun the same frozen direct→17897 command.",
+        "Freeze and probe an explicit different-family replication snapshot from the authenticated inventory.",
+    ]
+    if not embedding_passed:
+        candidate_paths.append(
+            "Qualify the frozen BAAI/bge-m3 model/tokenizer revision on the local CUDA environment."
+        )
+    candidate_paths.append(
+        "Provide real dataset-derived component workloads and dated provider pricing; otherwise keep the cost Gate blocked."
+    )
     body = [
         "# Day 1 Gate stall report",
         "",
@@ -940,6 +1734,14 @@ def _write_stall_report(output_dir: Path, artifacts: Mapping[str, Mapping[str, A
         "## Models used",
         "",
         *(f"- {model}" for model in models),
+        "",
+        "## Sub-Gate status",
+        "",
+        f"- Hugging Face connectivity: {artifacts.get('proxy_probe.json', {}).get('status', 'unknown')}",
+        f"- API model inventory: {artifacts.get('model_inventory.json', {}).get('status', 'unknown')}",
+        f"- embedding: {artifacts.get('embedding_probe.json', {}).get('status', 'unknown')}",
+        f"- replication model: {artifacts.get('replication_model_probe.json', {}).get('status', 'unknown')}",
+        f"- full cost upper bound: {artifacts.get('cost_upper_bound.json', {}).get('status', 'unknown')}",
         "",
         "## Error classification",
         "",
@@ -966,13 +1768,11 @@ def _write_stall_report(output_dir: Path, artifacts: Mapping[str, Mapping[str, A
         "",
         "## Candidate paths",
         "",
-        "- Restore or provide an authorized credential, then rerun the same frozen direct→17897 command.",
-        "- Freeze a different-family replication snapshot and the BAAI/bge-m3 model/tokenizer revision.",
-        "- Provide real dataset-derived component workloads and dated provider pricing; otherwise keep the cost Gate blocked.",
+        *(f"- {path}" for path in candidate_paths),
         "",
         "## User decision required",
         "",
-        "- Decide whether to provide/authorize the missing credential and frozen revisions/pricing inputs, or keep Day 1 blocked.",
+        "- Decide whether to resolve the provider/API authorization or edge rejection condition and provide frozen pricing inputs, or keep Day 1 blocked.",
         "",
         "## Evidence",
         "",
@@ -992,24 +1792,58 @@ def run_day1_probe(
     full_cost_inputs: Mapping[str, Any] | None = None,
     timeout: float = 300.0,
     request_fn: RequestFn = http_json_request,
-    embedding_probe_fn: Callable[[str, str | None], dict[str, Any]] = probe_embedding,
+    embedding_probe_fn: Callable[[str, str | None], dict[str, Any]] | None = None,
+    episode_probe: Mapping[str, Any] | None = None,
+    hf_cache_dir: Path = DEFAULT_HF_HUB_CACHE,
 ) -> dict[str, Any]:
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    base_url = (base_url or os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+    base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    if base_url != DEFAULT_BASE_URL:
+        raise ValueError(f"canonical base URL is {DEFAULT_BASE_URL}")
     api_key = api_key if api_key is not None else os.environ.get("OPENAI_API_KEY")
+    embedding_revision = embedding_revision or BGE_M3_REVISION
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     artifacts: dict[str, dict[str, Any]] = {}
 
+    proxy = probe_huggingface_connectivity(
+        request_fn=request_fn, timeout=min(timeout, 15.0)
+    )
     inventory_response, inventory_attempts = request_with_fallback(request_fn, f"{base_url}/models", headers=headers, timeout=min(timeout, 60.0))
-    proxy = {"schema_version": "plan-robust-memory.proxy-probe.v1", "created_at": _now(), "status": "passed" if inventory_response is not None else "blocked", "proxy_url": PROXY_URL, "attempt_order": ["direct", "proxy_17897"], "attempts": inventory_attempts}
+    proxy["api_inventory_attempts"] = inventory_attempts
     artifacts["proxy_probe.json"] = proxy
     model_ids = sorted(str(row.get("id")) for row in (inventory_response or {}).get("data", []) if isinstance(row, Mapping) and row.get("id"))
-    inventory = {"schema_version": "plan-robust-memory.model-inventory.v1", "created_at": _now(), "status": "passed" if inventory_response is not None else "blocked", "base_url": base_url, "provider": "labforge", "credential_present": bool(api_key), "returned_model_ids": model_ids, "required_models": [PRIMARY_MODEL, JUDGE_MODEL], "replication_model": replication_model, "attempts": inventory_attempts}
+    missing_required_models = [
+        model_id for model_id in (PRIMARY_MODEL, JUDGE_MODEL) if model_id not in model_ids
+    ]
+    if inventory_response is None:
+        inventory_reason = "model inventory failed through direct and proxy_17897 routes"
+    elif missing_required_models:
+        inventory_reason = "required models absent from authenticated inventory: " + ", ".join(
+            missing_required_models
+        )
+    else:
+        inventory_reason = None
+    inventory = {
+        "schema_version": "plan-robust-memory.model-inventory.v1",
+        "created_at": _now(),
+        "status": "passed" if inventory_reason is None else "blocked",
+        "base_url": base_url,
+        "endpoint": f"{base_url}/models",
+        "request_protocol": "openai_compatible_models_inventory",
+        "provider": "labforge",
+        "credential_present": bool(api_key),
+        "returned_model_ids": model_ids,
+        "required_models": [PRIMARY_MODEL, JUDGE_MODEL],
+        "missing_required_models": missing_required_models,
+        "replication_model": replication_model,
+        "blocking_reason": inventory_reason,
+        "attempts": inventory_attempts,
+    }
     artifacts["model_inventory.json"] = inventory
 
-    if inventory_response is None:
-        reason = "model inventory failed through direct and proxy_17897 routes"
+    if inventory_reason is not None:
+        reason = inventory_reason
         artifacts["primary_115k_probe.json"] = _blocked_artifact("primary_115k", base_url, reason)
         artifacts["primary_output_probe.json"] = _blocked_artifact("primary_output", base_url, reason)
         artifacts["judge_probe.json"] = _blocked_artifact("judge", base_url, reason)
@@ -1030,7 +1864,33 @@ def run_day1_probe(
         else:
             artifacts["replication_model_probe.json"] = _blocked_artifact("replication", base_url, "explicit different-family replication model is missing or absent from inventory")
 
-    embedding_artifact = dict(embedding_probe_fn("BAAI/bge-m3", embedding_revision))
+    if embedding_probe_fn is None:
+        try:
+            episode_probe = episode_probe or load_real_episode_probe()
+            embedding_artifact = dict(
+                probe_embedding(
+                    BGE_M3_MODEL,
+                    embedding_revision,
+                    episode_probe=episode_probe,
+                    hf_cache_dir=hf_cache_dir,
+                )
+            )
+        except Exception as exc:
+            embedding_artifact = dict(
+                probe_embedding(
+                    BGE_M3_MODEL,
+                    embedding_revision,
+                    episode_probe=None,
+                    hf_cache_dir=hf_cache_dir,
+                )
+            )
+            embedding_artifact["blocking_reason"] = (
+                f"real LongMemEval episode probe could not be loaded: {type(exc).__name__}: {str(exc)[:500]}"
+            )
+    else:
+        # Tests and explicitly injected qualification fixtures use the old
+        # two-argument hook; they must still satisfy the full artifact contract.
+        embedding_artifact = dict(embedding_probe_fn(BGE_M3_MODEL, embedding_revision))
     if not _embedding_qualified(embedding_artifact):
         embedding_artifact["status"] = "blocked"
         embedding_artifact.setdefault(
@@ -1062,8 +1922,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the real Day 1 environment and model Gate")
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/day1"))
     parser.add_argument("--base-url", default=None)
+    parser.add_argument(
+        "--hf-cache-dir",
+        type=Path,
+        default=DEFAULT_HF_HUB_CACHE,
+        help="Ignored repo-local Hugging Face hub cache containing the frozen snapshot",
+    )
     parser.add_argument("--replication-model", default=os.environ.get("REPLICATION_MODEL"))
-    parser.add_argument("--embedding-revision", default=os.environ.get("BGE_M3_REVISION"))
+    parser.add_argument(
+        "--embedding-revision",
+        default=os.environ.get("BGE_M3_REVISION") or BGE_M3_REVISION,
+    )
     parser.add_argument(
         "--cost-inputs",
         type=Path,
@@ -1072,6 +1941,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--timeout", type=float, default=300.0)
     args = parser.parse_args(argv)
+    if args.embedding_revision != BGE_M3_REVISION:
+        parser.error(f"BGE-M3 revision is frozen at {BGE_M3_REVISION}")
     full_cost_inputs = (
         json.loads(args.cost_inputs.read_text(encoding="utf-8")) if args.cost_inputs is not None else None
     )
@@ -1082,6 +1953,7 @@ def main(argv: list[str] | None = None) -> int:
         embedding_revision=args.embedding_revision,
         full_cost_inputs=full_cost_inputs,
         timeout=args.timeout,
+        hf_cache_dir=args.hf_cache_dir,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0 if result["status"] == "passed" else 2

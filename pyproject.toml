@@ -11,6 +11,16 @@ dependencies = ["jsonschema>=4.23,<5"]
 
 [project.optional-dependencies]
 test = ["pytest>=8.3,<9"]
+embedding = [
+  "numpy==2.2.6",
+  "torch==2.6.0",
+  "transformers==4.48.3",
+  "huggingface-hub==0.28.1",
+  "tokenizers==0.21.0",
+  "safetensors==0.5.2",
+  "sentencepiece==0.2.0",
+  "sentence-transformers==3.4.1",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -23,4 +33,3 @@ markers = [
   "external: requires network, API credentials, a GPU, or non-fixture benchmark data",
   "qualification: protocol qualification gate",
 ]
-
