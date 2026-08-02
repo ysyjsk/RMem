@@ -2154,13 +2154,13 @@ Day 1 必须完成：
 11. 冻结 `R_pilot=3`、`R_formal=5`；
 12. 生成 primary、replication、SATURATION、D_leaf 和 future k-sweep 成本上界。
 
-具体模型调用方式、API/本地分工、代理、probe 和 fallback 规则以同目录的：
+具体模型调用方式、API/本地分工、代理、probe 和 fallback 规则以同目录的唯一 canonical 文件为准：
 
 ```text
-Plan_Robust_Agent_Memory_Model_Framework_Usage_v1.1.md
+Plan_Robust_Agent_Memory_Model_Framework_Usage.md
 ```
 
-为准。
+历史提法中的模型框架 `v1.0` 与 `v1.1` 均为该文件的别名，不表示不同合同，也不得与 `eval-protocol-v1.0/v1.1` 的阶段版本混用。
 
 Day 1 若样本量、模型窗口、不同家族 replication model、embedding revision 或网络条件不可行，立即报告用户，不继续堆代码。
 
@@ -2309,7 +2309,7 @@ Q0 未完成不得进入 feasibility pilot。
 - 17897 代理探活；
 - unified B、k-axis、plan-set、R 和阈值分离红测试；
 - 全量 primary/replication/qualification 成本上界；
-- implementation errata 与模型框架 v1.1。
+- implementation errata 与 canonical 模型框架文件。
 
 ## 第 2 日：测试骨架与 Schema
 
