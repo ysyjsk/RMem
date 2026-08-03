@@ -8,9 +8,11 @@ import importlib.util
 import json
 import math
 import os
+import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -27,6 +29,7 @@ ARTIFACT_NAMES = (
     "embedding_probe.json",
     "cost_upper_bound.json",
 )
+RUN_STATE_NAME = "day1_run_state.json"
 DEFAULT_BASE_URL = "https://api.labforge.cc/v1"
 CHAT_COMPLETIONS_PATH = "/chat/completions"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -72,7 +75,92 @@ def _sha256_file(path: Path) -> str:
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(value), ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    serialized = json.dumps(
+        dict(value), ensure_ascii=False, sort_keys=True, indent=2
+    ) + "\n"
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        try:
+            Path(temporary_name).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def inspect_day1_run(output_dir: Path) -> dict[str, Any]:
+    """Classify published Day 1 evidence without trusting filenames or mtimes."""
+
+    output_dir = output_dir.resolve()
+    state_path = output_dir / RUN_STATE_NAME
+    if not state_path.exists():
+        return {
+            "evidence_status": "unknown",
+            "reason": "missing_run_state",
+            "output_dir": str(output_dir),
+        }
+    try:
+        run_state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "evidence_status": "unknown",
+            "reason": "invalid_run_state",
+            "output_dir": str(output_dir),
+        }
+    run_id = run_state.get("run_id")
+    if run_state.get("state") != "completed" or not run_id:
+        return {
+            "evidence_status": "unknown",
+            "reason": "run_not_completed",
+            "run_id": run_id,
+            "run_state": run_state.get("state"),
+            "output_dir": str(output_dir),
+        }
+
+    missing: list[str] = []
+    mismatched: list[str] = []
+    nonterminal: list[str] = []
+    artifact_statuses: dict[str, Any] = {}
+    for name in ARTIFACT_NAMES:
+        path = output_dir / name
+        if not path.exists():
+            missing.append(name)
+            continue
+        try:
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            nonterminal.append(name)
+            continue
+        if artifact.get("run_id") != run_id:
+            mismatched.append(name)
+        if artifact.get("artifact_state") != "completed":
+            nonterminal.append(name)
+        artifact_statuses[name] = artifact.get("status")
+    if missing or mismatched or nonterminal:
+        return {
+            "evidence_status": "unknown",
+            "reason": "artifact_set_not_coherent",
+            "run_id": run_id,
+            "missing_artifacts": missing,
+            "mismatched_run_id_artifacts": mismatched,
+            "nonterminal_artifacts": nonterminal,
+            "output_dir": str(output_dir),
+        }
+    return {
+        "evidence_status": "verified",
+        "run_id": run_id,
+        "status": run_state.get("status"),
+        "artifact_statuses": artifact_statuses,
+        "output_dir": str(output_dir),
+    }
 
 
 def http_json_request(
@@ -1805,13 +1893,56 @@ def run_day1_probe(
     embedding_revision = embedding_revision or BGE_M3_REVISION
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     artifacts: dict[str, dict[str, Any]] = {}
+    run_id = f"day1-{uuid.uuid4().hex}"
+    run_started_at = _now()
+    run_state_path = output_dir / RUN_STATE_NAME
+    run_state = {
+        "schema_version": "plan-robust-memory.day1-run-state.v1",
+        "run_id": run_id,
+        "state": "running",
+        "status": "running",
+        "started_at": run_started_at,
+        "completed_at": None,
+        "pid": os.getpid(),
+        "base_url": base_url,
+        "artifact_names": list(ARTIFACT_NAMES),
+    }
+    _write_json(run_state_path, run_state)
+    for name in ARTIFACT_NAMES:
+        _write_json(
+            output_dir / name,
+            {
+                "schema_version": "plan-robust-memory.day1-artifact-state.v1",
+                "artifact_name": name,
+                "artifact_state": "pending",
+                "status": "pending",
+                "run_id": run_id,
+                "run_started_at": run_started_at,
+                "artifact_completed_at": None,
+            },
+        )
+
+    def publish_artifact(name: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        artifact = dict(value)
+        artifact.update(
+            {
+                "artifact_name": name,
+                "artifact_state": "completed",
+                "run_id": run_id,
+                "run_started_at": run_started_at,
+                "artifact_completed_at": _now(),
+            }
+        )
+        artifacts[name] = artifact
+        _write_json(output_dir / name, artifact)
+        return artifact
 
     proxy = probe_huggingface_connectivity(
         request_fn=request_fn, timeout=min(timeout, 15.0)
     )
     inventory_response, inventory_attempts = request_with_fallback(request_fn, f"{base_url}/models", headers=headers, timeout=min(timeout, 60.0))
     proxy["api_inventory_attempts"] = inventory_attempts
-    artifacts["proxy_probe.json"] = proxy
+    publish_artifact("proxy_probe.json", proxy)
     model_ids = sorted(str(row.get("id")) for row in (inventory_response or {}).get("data", []) if isinstance(row, Mapping) and row.get("id"))
     missing_required_models = [
         model_id for model_id in (PRIMARY_MODEL, JUDGE_MODEL) if model_id not in model_ids
@@ -1840,29 +1971,60 @@ def run_day1_probe(
         "blocking_reason": inventory_reason,
         "attempts": inventory_attempts,
     }
-    artifacts["model_inventory.json"] = inventory
+    publish_artifact("model_inventory.json", inventory)
 
     if inventory_reason is not None:
         reason = inventory_reason
-        artifacts["primary_115k_probe.json"] = _blocked_artifact("primary_115k", base_url, reason)
-        artifacts["primary_output_probe.json"] = _blocked_artifact("primary_output", base_url, reason)
-        artifacts["judge_probe.json"] = _blocked_artifact("judge", base_url, reason)
-        artifacts["replication_model_probe.json"] = _blocked_artifact("replication", base_url, reason)
+        publish_artifact(
+            "primary_115k_probe.json",
+            _blocked_artifact("primary_115k", base_url, reason),
+        )
+        publish_artifact(
+            "primary_output_probe.json",
+            _blocked_artifact("primary_output", base_url, reason),
+        )
+        publish_artifact(
+            "judge_probe.json", _blocked_artifact("judge", base_url, reason)
+        )
+        publish_artifact(
+            "replication_model_probe.json",
+            _blocked_artifact("replication", base_url, reason),
+        )
     else:
         long_input = "probe " * 115000
-        artifacts["primary_115k_probe.json"] = _primary_115k_probe(
-            request_fn=request_fn,
-            base_url=base_url,
-            headers=headers,
-            input_text=long_input,
-            timeout=timeout,
+        publish_artifact(
+            "primary_115k_probe.json",
+            _primary_115k_probe(
+                request_fn=request_fn,
+                base_url=base_url,
+                headers=headers,
+                input_text=long_input,
+                timeout=timeout,
+            ),
         )
-        artifacts["primary_output_probe.json"] = _model_probe(request_fn=request_fn, base_url=base_url, headers=headers, model=PRIMARY_MODEL, input_text="Return the word probe repeatedly within the requested output budget.", max_output_tokens=4096, repetitions=1, timeout=timeout, role="primary_output_4096")
-        artifacts["judge_probe.json"] = _judge_probe(request_fn=request_fn, base_url=base_url, headers=headers, timeout=timeout)
+        publish_artifact(
+            "primary_output_probe.json",
+            _model_probe(request_fn=request_fn, base_url=base_url, headers=headers, model=PRIMARY_MODEL, input_text="Return the word probe repeatedly within the requested output budget.", max_output_tokens=4096, repetitions=1, timeout=timeout, role="primary_output_4096"),
+        )
+        publish_artifact(
+            "judge_probe.json",
+            _judge_probe(
+                request_fn=request_fn,
+                base_url=base_url,
+                headers=headers,
+                timeout=timeout,
+            ),
+        )
         if replication_model and replication_model in model_ids and replication_model not in {PRIMARY_MODEL, JUDGE_MODEL}:
-            artifacts["replication_model_probe.json"] = _model_probe(request_fn=request_fn, base_url=base_url, headers=headers, model=replication_model, input_text="Constructor/merge/answer capability probe.", max_output_tokens=128, repetitions=3, timeout=timeout, role="replication_constructor_merge_answer")
+            publish_artifact(
+                "replication_model_probe.json",
+                _model_probe(request_fn=request_fn, base_url=base_url, headers=headers, model=replication_model, input_text="Constructor/merge/answer capability probe.", max_output_tokens=128, repetitions=3, timeout=timeout, role="replication_constructor_merge_answer"),
+            )
         else:
-            artifacts["replication_model_probe.json"] = _blocked_artifact("replication", base_url, "explicit different-family replication model is missing or absent from inventory")
+            publish_artifact(
+                "replication_model_probe.json",
+                _blocked_artifact("replication", base_url, "explicit different-family replication model is missing or absent from inventory"),
+            )
 
     if embedding_probe_fn is None:
         try:
@@ -1897,11 +2059,10 @@ def run_day1_probe(
             "blocking_reason",
             "real encode plus deterministic ranking/packing and explicit model/tokenizer revisions are required",
         )
-    artifacts["embedding_probe.json"] = embedding_artifact
-    artifacts["cost_upper_bound.json"] = _build_cost_upper_bound(full_cost_inputs)
-
-    for name in ARTIFACT_NAMES:
-        _write_json(output_dir / name, artifacts[name])
+    publish_artifact("embedding_probe.json", embedding_artifact)
+    publish_artifact(
+        "cost_upper_bound.json", _build_cost_upper_bound(full_cost_inputs)
+    )
     required_gate_names = (
         "model_inventory.json",
         "primary_115k_probe.json",
@@ -1915,7 +2076,26 @@ def run_day1_probe(
     stall_path = None
     if not passed:
         stall_path = _write_stall_report(output_dir, artifacts)
-    return {"status": "passed" if passed else "blocked", "routes": ["direct", "proxy_17897"], "output_dir": str(output_dir), "stall_report": str(stall_path) if stall_path else None, "full_leaf_generation_allowed": False}
+    final_status = "passed" if passed else "blocked"
+    run_state.update(
+        {
+            "state": "completed",
+            "status": final_status,
+            "completed_at": _now(),
+            "stall_report": str(stall_path) if stall_path else None,
+        }
+    )
+    _write_json(run_state_path, run_state)
+    return {
+        "status": final_status,
+        "run_id": run_id,
+        "run_state": str(run_state_path),
+        "evidence": inspect_day1_run(output_dir),
+        "routes": ["direct", "proxy_17897"],
+        "output_dir": str(output_dir),
+        "stall_report": str(stall_path) if stall_path else None,
+        "full_leaf_generation_allowed": False,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

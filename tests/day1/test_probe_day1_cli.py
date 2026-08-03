@@ -27,6 +27,7 @@ from plan_robust_memory.probe_day1 import (
     load_real_episode_probe,
     probe_huggingface_connectivity,
     probe_embedding,
+    inspect_day1_run,
     run_day1_probe,
 )
 from plan_robust_memory.hashing import stable_hash
@@ -174,6 +175,205 @@ def test_all_vertical_commands_are_module_executable() -> None:
 def test_day1_generation_contract_is_frozen_to_clean_chat_completions() -> None:
     assert DEFAULT_BASE_URL == "https://api.labforge.cc/v1"
     assert CHAT_COMPLETIONS_PATH == "/chat/completions"
+
+
+def test_day1_replaces_stale_artifacts_before_inventory_completes(tmp_path: Path) -> None:
+    stale_payload = {
+        "status": "blocked",
+        "run_id": "stale-run",
+        "attempts": [{"http_status": 400}],
+    }
+    for name in ARTIFACT_NAMES:
+        (tmp_path / name).write_text(json.dumps(stale_payload), encoding="utf-8")
+
+    inventory_started = threading.Event()
+    release_inventory = threading.Event()
+    successful = _successful_request_fixture()
+
+    def blocking_inventory_request(url, **kwargs):
+        if url == day1.HUGGINGFACE_PROBE_URL:
+            return {}, {
+                "status": 200,
+                "route": kwargs.get("route", "direct"),
+                "request_id": "hf-fixture",
+                "elapsed_seconds": 0.01,
+            }
+        if url.endswith("/models"):
+            inventory_started.set()
+            if not release_inventory.wait(timeout=10):
+                raise TimeoutError("test did not release inventory request")
+        return successful(url, **kwargs)
+
+    outcome: dict[str, object] = {}
+
+    def run_probe() -> None:
+        try:
+            outcome["result"] = run_day1_probe(
+                tmp_path,
+                request_fn=blocking_inventory_request,
+                api_key="test-key",
+                replication_model="replica-1",
+                embedding_revision="fixture-revision",
+                embedding_probe_fn=_canonical_embedding_fixture,
+                full_cost_inputs=_full_cost_inputs(),
+            )
+        except BaseException as exc:  # pragma: no cover - re-raised in the test thread
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_probe, daemon=True)
+    worker.start()
+    assert inventory_started.wait(timeout=5)
+    try:
+        run_state = json.loads(
+            (tmp_path / "day1_run_state.json").read_text(encoding="utf-8")
+        )
+        assert run_state["state"] == "running"
+        assert run_state["run_id"] != "stale-run"
+
+        inventory = json.loads(
+            (tmp_path / "model_inventory.json").read_text(encoding="utf-8")
+        )
+        assert inventory["status"] == "pending"
+        assert inventory["artifact_state"] == "pending"
+        assert inventory["run_id"] == run_state["run_id"]
+        assert "attempts" not in inventory
+
+        for name in ARTIFACT_NAMES:
+            payload = json.loads((tmp_path / name).read_text(encoding="utf-8"))
+            assert payload["run_id"] == run_state["run_id"]
+    finally:
+        release_inventory.set()
+        worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    if error := outcome.get("error"):
+        raise error
+
+
+def test_day1_publishes_current_inventory_before_generation_finishes(tmp_path: Path) -> None:
+    for name in ARTIFACT_NAMES:
+        (tmp_path / name).write_text(
+            json.dumps({"status": "blocked", "run_id": "stale-run"}),
+            encoding="utf-8",
+        )
+
+    generation_started = threading.Event()
+    release_generation = threading.Event()
+    block_lock = threading.Lock()
+    blocked_once = False
+    successful = _successful_request_fixture()
+
+    def blocking_generation_request(url, **kwargs):
+        nonlocal blocked_once
+        if url == day1.HUGGINGFACE_PROBE_URL:
+            return {}, {
+                "status": 200,
+                "route": kwargs.get("route", "direct"),
+                "request_id": "hf-fixture",
+                "elapsed_seconds": 0.01,
+            }
+        should_block = False
+        if url.endswith(CHAT_COMPLETIONS_PATH):
+            with block_lock:
+                if not blocked_once:
+                    blocked_once = True
+                    should_block = True
+        if should_block:
+            generation_started.set()
+            if not release_generation.wait(timeout=10):
+                raise TimeoutError("test did not release generation request")
+        return successful(url, **kwargs)
+
+    outcome: dict[str, object] = {}
+
+    def run_probe() -> None:
+        try:
+            outcome["result"] = run_day1_probe(
+                tmp_path,
+                request_fn=blocking_generation_request,
+                api_key="test-key",
+                replication_model="replica-1",
+                embedding_revision="fixture-revision",
+                embedding_probe_fn=_canonical_embedding_fixture,
+                full_cost_inputs=_full_cost_inputs(),
+            )
+        except BaseException as exc:  # pragma: no cover - re-raised in the test thread
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_probe, daemon=True)
+    worker.start()
+    assert generation_started.wait(timeout=5)
+    try:
+        run_state = json.loads(
+            (tmp_path / "day1_run_state.json").read_text(encoding="utf-8")
+        )
+        inventory = json.loads(
+            (tmp_path / "model_inventory.json").read_text(encoding="utf-8")
+        )
+        assert run_state["state"] == "running"
+        assert inventory["status"] == "passed"
+        assert inventory["artifact_state"] == "completed"
+        assert inventory["run_id"] == run_state["run_id"]
+        assert inventory["artifact_completed_at"] is not None
+        assert inventory["attempts"][0]["http_status"] == 200
+    finally:
+        release_generation.set()
+        worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    if error := outcome.get("error"):
+        raise error
+
+    final_state = json.loads(
+        (tmp_path / "day1_run_state.json").read_text(encoding="utf-8")
+    )
+    assert final_state["state"] == "completed"
+    assert final_state["status"] == "passed"
+    for name in ARTIFACT_NAMES:
+        artifact = json.loads((tmp_path / name).read_text(encoding="utf-8"))
+        assert artifact["run_id"] == final_state["run_id"]
+        assert artifact["artifact_state"] == "completed"
+
+
+def test_day1_inspection_refuses_stale_or_incomplete_artifact_sets(tmp_path: Path) -> None:
+    for name in ARTIFACT_NAMES:
+        (tmp_path / name).write_text(
+            json.dumps({"status": "blocked", "run_id": "stale-run"}),
+            encoding="utf-8",
+        )
+    assert inspect_day1_run(tmp_path)["reason"] == "missing_run_state"
+
+    (tmp_path / "day1_run_state.json").write_text(
+        json.dumps({"state": "running", "run_id": "current-run"}),
+        encoding="utf-8",
+    )
+    running = inspect_day1_run(tmp_path)
+    assert running["evidence_status"] == "unknown"
+    assert running["reason"] == "run_not_completed"
+
+    (tmp_path / "day1_run_state.json").write_text(
+        json.dumps({"state": "completed", "status": "blocked", "run_id": "current-run"}),
+        encoding="utf-8",
+    )
+    mismatched = inspect_day1_run(tmp_path)
+    assert mismatched["evidence_status"] == "unknown"
+    assert mismatched["reason"] == "artifact_set_not_coherent"
+    assert set(mismatched["mismatched_run_id_artifacts"]) == set(ARTIFACT_NAMES)
+
+    for name in ARTIFACT_NAMES:
+        (tmp_path / name).write_text(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "artifact_state": "completed",
+                    "run_id": "current-run",
+                }
+            ),
+            encoding="utf-8",
+        )
+    verified = inspect_day1_run(tmp_path)
+    assert verified["evidence_status"] == "verified"
+    assert verified["run_id"] == "current-run"
 
 
 def test_http_error_attempt_records_empty_body_hash() -> None:

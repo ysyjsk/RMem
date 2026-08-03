@@ -455,6 +455,19 @@ fallback_order: direct, http://127.0.0.1:17897
 
 每个 probe artifact 必须记录最终 URL/endpoint、实际 route、requested/returned model、usage、request ID、response hash 和失败尝试。API key 只能从环境变量读取，禁止写入 artifact、日志、cache 或版本库。
 
+### 3.1.2 Day 1 artifact 新鲜度与 run identity 合同
+
+反思记录：此前曾在 `python -m plan_robust_memory.probe_day1` 仍运行时读取 `artifacts/day1/model_inventory.json`，看到旧 run 的 HTTP 400 后提前判定本次 inventory 失败并中止进程。该结论无效。原因是旧实现先在内存中完成 inventory、115K、judge、embedding 与 cost 等步骤，最后才统一覆盖八个 artifact；运行中读取同名文件无法证明它属于当前进程。本次最终落盘证据反而显示 `model_inventory.json` 已通过 direct HTTP 200。
+
+为防止再次误判，Day 1 artifact 必须满足以下新鲜度合同：
+
+1. 运行开始时立即写入 `day1_run_state.json`，包含 `run_id`、`state=running`、`started_at`、`pid` 和八个 artifact 文件名；
+2. 运行开始时立即用同一 `run_id` 的 `pending` artifact 原子替换八个旧 JSON，禁止裸露上一轮 artifact；
+3. 每个 sub-gate 完成后立即原子发布对应 artifact，不得等整轮 run 结束才批量写入；
+4. 任何 agent、脚本或人工诊断在 `day1_run_state.json` 不存在、`state != completed`、artifact `run_id` 不一致或 `artifact_state != completed` 时，只能把该目录判为 `unknown / running`，不得据此报告 passed 或 blocked；
+5. 停止或中止运行前，必须先记录当前 `run_id`、进程状态、artifact mtime/ctime 与 `day1_run_state.json`，并在进程结束后重新核对同一 `run_id` 的最终 artifact set；
+6. 任何 Day 1 结论必须引用同一 `run_id` 下完整八文件和 completed run state，mtime 只能作为辅助证据，不能替代 run identity。
+
 ## 3.2 防止原地踏步的执行循环
 
 每个 milestone 每个工作会话结束时必须记录：
@@ -2198,6 +2211,8 @@ cost_upper_bound.json
 ```
 
 其中 `/models` 只用于 inventory；primary 115K、primary 4096-output、judge 与 replication 的生成探针必须使用 `https://api.labforge.cc/v1/chat/completions`、单一 `user` message 和 wire 字段 `max_tokens`。route 只允许两次：`direct`，失败后 `proxy_17897`；禁止同一路径无证据重试。任何旧的模型框架 v1.0/v1.1 别名、`/responses` 请求或客户端角色注入均不构成合格的 Day 1 证据。
+
+Day 1 artifact 证据必须通过 `day1_run_state.json` 校验：`state=completed`、八个 artifact 均为同一 `run_id`、每个 artifact 的 `artifact_state=completed`。如果 probe 仍在运行，或同名 JSON 缺少本次 `run_id`，该目录只能判为 `unknown`，不得读取旧 artifact 后宣称本次 run 已 blocked 或 passed。运行中若需要诊断，只能报告当前阶段、进程状态和 pending/completed artifact，不得据旧文件停止进程。
 
 具体模型调用方式、API/本地分工、代理、probe 和 fallback 规则以同目录的唯一 canonical 文件为准：
 
