@@ -154,12 +154,163 @@ def inspect_day1_run(output_dir: Path) -> dict[str, Any]:
             "nonterminal_artifacts": nonterminal,
             "output_dir": str(output_dir),
         }
+    expected_status = (
+        "passed" if all(status == "passed" for status in artifact_statuses.values()) else "blocked"
+    )
+    if run_state.get("status") != expected_status:
+        return {
+            "evidence_status": "unknown",
+            "reason": "run_state_status_mismatch",
+            "run_id": run_id,
+            "run_state_status": run_state.get("status"),
+            "artifact_statuses": artifact_statuses,
+            "expected_status": expected_status,
+            "output_dir": str(output_dir),
+        }
     return {
         "evidence_status": "verified",
         "run_id": run_id,
         "status": run_state.get("status"),
         "artifact_statuses": artifact_statuses,
         "output_dir": str(output_dir),
+    }
+
+
+def _load_refreshable_day1_state(output_dir: Path) -> tuple[Path, dict[str, Any]]:
+    output_dir = output_dir.resolve()
+    evidence = inspect_day1_run(output_dir)
+    if evidence.get("evidence_status") != "verified":
+        raise ValueError(
+            f"Day 1 artifact set is not refreshable: {evidence.get('reason', 'unverified')}"
+        )
+    state_path = output_dir / RUN_STATE_NAME
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    return state_path, state
+
+
+def _refresh_day1_artifact(
+    output_dir: Path,
+    *,
+    name: str,
+    value: Mapping[str, Any],
+    check_name: str,
+    state_path: Path,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    target_path = output_dir / name
+    try:
+        previous = json.loads(target_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot refresh missing or invalid target artifact: {name}") from exc
+    if previous.get("status") == "passed":
+        raise ValueError(f"artifact {name} is already passed; refusing to rewrite it")
+
+    refresh_started_at = _now()
+    state["state"] = "refreshing"
+    state["refreshing_artifact"] = name
+    state["refresh_started_at"] = refresh_started_at
+    _write_json(state_path, state)
+
+    updated_at = _now()
+    artifact = dict(value)
+    artifact.update(
+        {
+            "artifact_name": name,
+            "artifact_state": "completed",
+            "run_id": state["run_id"],
+            "run_started_at": state.get("started_at"),
+            "artifact_completed_at": updated_at,
+            "supplemental_requalification": {
+                "check": check_name,
+                "updated_at": updated_at,
+                "passed_gates_retested": False,
+            },
+        }
+    )
+    _write_json(target_path, artifact)
+    checks = dict(state.get("supplemental_checks") or {})
+    checks[check_name] = {
+        "status": artifact.get("status"),
+        "artifact": name,
+        "updated_at": updated_at,
+        "passed_gates_retested": False,
+    }
+    state["supplemental_checks"] = checks
+    state["last_updated_at"] = updated_at
+    statuses = {
+        artifact_name: json.loads(
+            (output_dir / artifact_name).read_text(encoding="utf-8")
+        ).get("status")
+        for artifact_name in ARTIFACT_NAMES
+    }
+    state["status"] = (
+        "passed" if all(status == "passed" for status in statuses.values()) else "blocked"
+    )
+    if state["status"] == "passed" and state.get("stall_report"):
+        resolved = list(state.get("resolved_stall_reports") or [])
+        resolved.append(state["stall_report"])
+        state["resolved_stall_reports"] = resolved
+        state["stall_report"] = None
+    state["state"] = "completed"
+    state.pop("refreshing_artifact", None)
+    state.pop("refresh_started_at", None)
+    _write_json(state_path, state)
+    return artifact
+
+
+def refresh_day1_proxy_probe(
+    output_dir: Path,
+    *,
+    request_fn: RequestFn | None = None,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    output_dir = output_dir.resolve()
+    state_path, state = _load_refreshable_day1_state(output_dir)
+    previous = json.loads(
+        (output_dir / "proxy_probe.json").read_text(encoding="utf-8")
+    )
+    probe = probe_huggingface_connectivity(
+        request_fn=request_fn or http_json_request,
+        timeout=timeout,
+    )
+    if "api_inventory_attempts" in previous:
+        probe["api_inventory_attempts"] = previous["api_inventory_attempts"]
+    artifact = _refresh_day1_artifact(
+        output_dir,
+        name="proxy_probe.json",
+        value=probe,
+        check_name="huggingface_proxy",
+        state_path=state_path,
+        state=state,
+    )
+    return {
+        "status": artifact["status"],
+        "run_id": state["run_id"],
+        "artifact": str(output_dir / "proxy_probe.json"),
+        "passed_gates_retested": False,
+    }
+
+
+def refresh_day1_cost_artifact(
+    output_dir: Path,
+    *,
+    full_cost_inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    output_dir = output_dir.resolve()
+    state_path, state = _load_refreshable_day1_state(output_dir)
+    artifact = _refresh_day1_artifact(
+        output_dir,
+        name="cost_upper_bound.json",
+        value=_build_cost_upper_bound(full_cost_inputs),
+        check_name="cost",
+        state_path=state_path,
+        state=state,
+    )
+    return {
+        "status": artifact["status"],
+        "run_id": state["run_id"],
+        "artifact": str(output_dir / "cost_upper_bound.json"),
+        "passed_gates_retested": False,
     }
 
 
@@ -1731,57 +1882,18 @@ def _build_cost_upper_bound(full_cost_inputs: Mapping[str, Any] | None = None) -
     }
     if not isinstance(full_cost_inputs, Mapping):
         return artifact
-    components = full_cost_inputs.get("components")
-    dataset_checksum = full_cost_inputs.get("dataset_checksum")
-    dataset_source = full_cost_inputs.get("dataset_source")
-    pricing_source = full_cost_inputs.get("pricing_source")
-    currency = full_cost_inputs.get("currency")
-    if not (
-        isinstance(components, Mapping)
-        and dataset_checksum
-        and dataset_source
-        and pricing_source
-        and currency
-    ):
-        return artifact
-    normalized: dict[str, dict[str, Any]] = {}
-    for name in REQUIRED_COST_COMPONENTS:
-        component = components.get(name)
-        if not isinstance(component, Mapping):
-            return artifact
-        numeric_fields = (
-            "call_upper_bound",
-            "input_token_upper_bound",
-            "output_token_upper_bound",
-            "monetary_upper_bound",
-        )
-        if any(
-            isinstance(component.get(field), bool)
-            or not isinstance(component.get(field), (int, float))
-            or float(component[field]) < 0
-            for field in numeric_fields
-        ):
-            return artifact
-        normalized[name] = {
-            "status": "frozen",
-            **{field: component[field] for field in numeric_fields},
-        }
-    artifact.update(
-        {
-            "status": "passed",
-            "components": normalized,
-            "dataset_source": str(dataset_source),
-            "dataset_checksum": str(dataset_checksum),
-            "pricing_source": str(pricing_source),
-            "currency": str(currency),
-            "monetary_upper_bound": sum(
-                float(component["monetary_upper_bound"]) for component in normalized.values()
-            ),
-            "blocking_reasons": [],
-        }
-    )
-    return artifact
 
+    # Cost evidence is accepted only after the independent parser has
+    # reconstructed every amount from the LabForge snapshot and workload rows.
+    # The legacy aggregate-only shape is intentionally fail-closed.
+    from .day1_cost import CostContractError, validate_full_experiment_cost_inputs
+
+    try:
+        validated = validate_full_experiment_cost_inputs(full_cost_inputs)
+    except CostContractError as exc:
+        artifact["blocking_reasons"] = [str(exc)]
+        return artifact
+    return validated
 
 def _unique_attempts(artifacts: Mapping[str, Mapping[str, Any]]) -> list[tuple[str, Mapping[str, Any]]]:
     seen: set[tuple[Any, ...]] = set()
@@ -2148,6 +2260,7 @@ def run_day1_probe(
         "cost_upper_bound.json", _build_cost_upper_bound(full_cost_inputs)
     )
     required_gate_names = (
+        "proxy_probe.json",
         "model_inventory.json",
         "primary_115k_probe.json",
         "primary_output_probe.json",

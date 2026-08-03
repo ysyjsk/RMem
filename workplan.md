@@ -1249,13 +1249,16 @@ Descriptors 在任何 topology answer 输出前冻结。无可靠 `answer_sessio
 
 ## 10.1 候选 Grid
 
-候选 budget grid 必须在配置中显式列出，并受模型输出上限约束，例如：
+成本上界使用的候选 budget envelope 现在冻结为以下完整集合；它是成本
+合同，不等同于 M8 在读取 topology 结果前选择的最终 budget 子集：
 
 ```text
-128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096
+B_cost_envelope = {128,192,256,384,512,768,1024,1536,2048,3072,4096}
 ```
 
-该列表是示例；冻结值取决于模型和 `C_leaf`，不得事后增加对结果有利的点。
+最终 `B_grid` 只能是该集合的子集。任何新增点、超出 `C_leaf` 或模型
+输出上限的点，都必须重新生成完整 workload、pricing 和 cost artifact，
+并重新通过 Day 1 cost Gate；不得在读取 topology 结果后增加有利点。
 
 ## 10.2 两个结构指标
 
@@ -2190,6 +2193,26 @@ Day 1 必须完成：
 10. 冻结 `K_planned={4,8,16}`、`k_primary=8`；
 11. 冻结 `R_pilot=3`、`R_formal=5`；
 12. 生成 primary、replication、SATURATION、D_leaf 和 future k-sweep 成本上界。
+
+Day 1 cost 上界必须由 `src/plan_robust_memory/day1_cost.py` 从真实
+LongMemEval manifest、power artifact、同一 run 的 model inventory/replication
+probe 和 LabForge 公开 pricing/status 快照重算。调用方不得直接提供聚合
+金额。成本合同冻结：
+
+- `B_cost_envelope={128,192,256,384,512,768,1024,1536,2048,3072,4096}`；
+  后续最终 budget 只能是该集合的子集；
+- 每个逻辑调用最多计两个不同 route 尝试，logical calls 与 billable
+  attempts 分开记录；
+- workload rows 按 component、role/model、split、`k`、budget envelope、plan
+  set 和 repeat 记录，并由代码聚合五个 component；
+- 输入使用冻结的客户端停止上限与 provider exact usage guard，输出上限按
+  role 协议记录；缺少 exact usage 或超出上限即重新打开 cost Gate；
+- 上界包括 primary stress/online、SATURATION、Q0 `D_leaf`、future k-sweep
+  及 matched-capacity 条件分支；未知费用不得记为零；
+- LabForge 费率从 `https://labforge.cc/api/pricing` 与
+  `https://labforge.cc/api/status` 推导，推理 base URL 仍固定为
+  `https://api.labforge.cc/v1`，并记录响应 hash、pricing version、公式
+  bundle hash 和模型比率。
 
 唯一执行入口为：
 

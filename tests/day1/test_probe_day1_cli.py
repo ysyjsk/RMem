@@ -28,8 +28,10 @@ from plan_robust_memory.probe_day1 import (
     probe_huggingface_connectivity,
     probe_embedding,
     inspect_day1_run,
+    refresh_day1_cost_artifact,
     run_day1_probe,
 )
+from plan_robust_memory.day1_cost import COST_BUDGET_ENVELOPE
 from plan_robust_memory.hashing import stable_hash
 
 
@@ -83,22 +85,89 @@ def _canonical_embedding_fixture(model: str, revision: str | None) -> dict:
 
 
 def _full_cost_inputs() -> dict:
+    rates = {
+        "gpt-5.6-sol": {"input": "1", "output": "6"},
+        "gpt-5.5": {"input": "1", "output": "6"},
+        "gpt-5.4": {"input": "0.5", "output": "3"},
+    }
+    components = {}
+    rows = []
+    models = {
+        "primary": "gpt-5.6-sol",
+        "replication": "gpt-5.4",
+        "SATURATION": "gpt-5.6-sol",
+        "D_leaf": "gpt-5.6-sol",
+        "future_k_sweep": "gpt-5.6-sol",
+    }
+    for index, name in enumerate(
+        ("primary", "replication", "SATURATION", "D_leaf", "future_k_sweep"),
+        start=1,
+    ):
+        logical = index
+        billable = logical * 2
+        input_per_call = index * 1000
+        output_per_call = index * 100
+        input_total = billable * input_per_call
+        output_total = billable * output_per_call
+        rate = rates[models[name]]
+        monetary_micro = int(input_total * float(rate["input"]) + output_total * float(rate["output"]))
+        row = {
+            "component": name,
+            "stage": name,
+            "role": "generation",
+            "model": models[name],
+            "backbone": "primary" if models[name] == "gpt-5.6-sol" else "replication",
+            "split": "all_primary_eligible",
+            "k": 8,
+            "budget_tokens": list(COST_BUDGET_ENVELOPE),
+            "plan": "fixture",
+            "repeat_count": 5,
+            "logical_call_upper_bound": logical,
+            "call_upper_bound": billable,
+            "input_tokens_per_billable_call": input_per_call,
+            "output_tokens_per_billable_call": output_per_call,
+            "input_token_upper_bound": input_total,
+            "output_token_upper_bound": output_total,
+            "monetary_upper_bound_microusd": monetary_micro,
+            "monetary_upper_bound": monetary_micro / 1_000_000,
+            "max_billable_attempts_per_logical_call": 2,
+            "workload_source_hash": "f" * 64,
+        }
+        rows.append(row)
+        components[name] = {
+            "component": name,
+            "status": "frozen",
+            "logical_call_upper_bound": logical,
+            "call_upper_bound": billable,
+            "input_token_upper_bound": input_total,
+            "output_token_upper_bound": output_total,
+            "monetary_upper_bound_microusd": monetary_micro,
+            "monetary_upper_bound": monetary_micro / 1_000_000,
+        }
+    total_micro = sum(row["monetary_upper_bound_microusd"] for row in rows)
     return {
+        "status": "passed",
         "dataset_source": "official-longmemeval-s-cleaned",
         "dataset_checksum": "a" * 64,
         "pricing_source": "provider-pricing-2026-08-01",
         "currency": "USD",
-        "components": {
-            name: {
-                "call_upper_bound": index + 1,
-                "input_token_upper_bound": (index + 1) * 1000,
-                "output_token_upper_bound": (index + 1) * 100,
-                "monetary_upper_bound": (index + 1) * 1.25,
-            }
-            for index, name in enumerate(
-                ("primary", "replication", "SATURATION", "D_leaf", "future_k_sweep")
-            )
+        "pricing_snapshot": {
+            "status": "passed",
+            "pricing_source_url": "https://labforge.cc/api/pricing",
+            "status_source_url": "https://labforge.cc/api/status",
+            "rates_usd_per_million_tokens": rates,
         },
+        "workload_contract": {
+            "budget_envelope_tokens": list(COST_BUDGET_ENVELOPE),
+            "budget_selection_frozen": False,
+            "actual_budget_must_be_subset": True,
+            "max_billable_attempts_per_logical_call": 2,
+            "input_bound_policy": {"kind": "client_stop_cap_plus_provider_usage_guard"},
+        },
+        "components": components,
+        "workload_rows": rows,
+        "monetary_upper_bound_microusd": total_micro,
+        "monetary_upper_bound": total_micro / 1_000_000,
     }
 
 
@@ -119,6 +188,15 @@ def _successful_request_fixture():
         with lock:
             counter += 1
             request_id = f"fixture-{counter}"
+        if url == day1.HUGGINGFACE_PROBE_URL:
+            return {}, {
+                "status": 200,
+                "route": route,
+                "request_id": request_id,
+                "elapsed_seconds": 0.01,
+                "ttft_seconds": 0.005,
+                "response_sha256": "c" * 64,
+            }
         if url.endswith("/models"):
             return {
                 "data": [{"id": PRIMARY_MODEL}, {"id": JUDGE_MODEL}, {"id": "replica-1"}]
@@ -376,6 +454,131 @@ def test_day1_inspection_refuses_stale_or_incomplete_artifact_sets(tmp_path: Pat
     assert verified["run_id"] == "current-run"
 
 
+def test_day1_blocked_cost_refresh_does_not_retest_passed_gates(tmp_path: Path) -> None:
+    successful = _successful_request_fixture()
+
+    def successful_with_hf(url, **kwargs):
+        if url == day1.HUGGINGFACE_PROBE_URL:
+            return {}, {
+                "status": 200,
+                "route": kwargs.get("route", "direct"),
+                "request_id": "hf-fixture",
+                "elapsed_seconds": 0.01,
+            }
+        return successful(url, **kwargs)
+
+    run_day1_probe(
+        tmp_path,
+        request_fn=successful_with_hf,
+        api_key="test-key",
+        replication_model="replica-1",
+        embedding_revision="fixture-revision",
+        embedding_probe_fn=_canonical_embedding_fixture,
+    )
+    before = {
+        name: (tmp_path / name).read_text(encoding="utf-8")
+        for name in ARTIFACT_NAMES
+        if name != "cost_upper_bound.json"
+    }
+
+    refreshed_cost = refresh_day1_cost_artifact(
+        tmp_path,
+        full_cost_inputs=_full_cost_inputs(),
+    )
+
+    assert refreshed_cost["status"] == "passed"
+    for name, content in before.items():
+        assert (tmp_path / name).read_text(encoding="utf-8") == content
+    state = json.loads(
+        (tmp_path / "day1_run_state.json").read_text(encoding="utf-8")
+    )
+    assert state["state"] == "completed"
+    assert state["status"] == "passed"
+    assert set(state["supplemental_checks"]) == {"cost"}
+    assert state["stall_report"] is None
+    assert state["resolved_stall_reports"]
+
+
+def test_day1_refresh_refuses_to_rewrite_a_passed_target(tmp_path: Path) -> None:
+    run_day1_probe(
+        tmp_path,
+        request_fn=_successful_request_fixture(),
+        api_key="test-key",
+        replication_model="replica-1",
+        embedding_revision="fixture-revision",
+        embedding_probe_fn=_canonical_embedding_fixture,
+        full_cost_inputs=_full_cost_inputs(),
+    )
+    before = (tmp_path / "cost_upper_bound.json").read_bytes()
+
+    with pytest.raises(ValueError, match="already passed"):
+        refresh_day1_cost_artifact(
+            tmp_path,
+            full_cost_inputs=_full_cost_inputs(),
+        )
+
+    assert (tmp_path / "cost_upper_bound.json").read_bytes() == before
+
+
+def test_day1_inspection_rejects_run_state_status_mismatch(tmp_path: Path) -> None:
+    (tmp_path / "day1_run_state.json").write_text(
+        json.dumps(
+            {
+                "state": "completed",
+                "status": "passed",
+                "run_id": "current-run",
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name in ARTIFACT_NAMES:
+        (tmp_path / name).write_text(
+            json.dumps(
+                {
+                    "status": "blocked" if name == "cost_upper_bound.json" else "passed",
+                    "artifact_state": "completed",
+                    "run_id": "current-run",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    evidence = inspect_day1_run(tmp_path)
+
+    assert evidence["evidence_status"] == "unknown"
+    assert evidence["reason"] == "run_state_status_mismatch"
+
+
+def test_day1_interrupted_cost_refresh_is_unknown(monkeypatch, tmp_path: Path) -> None:
+    run_day1_probe(
+        tmp_path,
+        request_fn=_successful_request_fixture(),
+        api_key="test-key",
+        replication_model="replica-1",
+        embedding_revision="fixture-revision",
+        embedding_probe_fn=_canonical_embedding_fixture,
+    )
+    original_write_json = day1._write_json
+
+    def fail_final_state_write(path: Path, value: dict) -> None:
+        if (
+            path.name == day1.RUN_STATE_NAME
+            and value.get("state") == "completed"
+            and "refreshing_artifact" not in value
+        ):
+            raise OSError("simulated interruption before refresh commit")
+        original_write_json(path, value)
+
+    monkeypatch.setattr(day1, "_write_json", fail_final_state_write)
+    with pytest.raises(OSError, match="simulated interruption"):
+        refresh_day1_cost_artifact(tmp_path, full_cost_inputs=_full_cost_inputs())
+
+    evidence = inspect_day1_run(tmp_path)
+
+    assert evidence["evidence_status"] == "unknown"
+    assert evidence["reason"] == "run_not_completed"
+
+
 def test_http_error_attempt_records_empty_body_hash() -> None:
     exc = urllib.error.HTTPError(
         "https://api.labforge.cc/v1/models",
@@ -582,7 +785,7 @@ def test_day1_can_pass_only_with_real_full_experiment_component_costs(tmp_path: 
     assert cost["status"] == "passed"
     assert cost["dataset_checksum"] == "a" * 64
     assert cost["pricing_source"] == "provider-pricing-2026-08-01"
-    assert cost["monetary_upper_bound"] == 18.75
+    assert cost["monetary_upper_bound"] == pytest.approx(0.1696)
     assert all(component["status"] == "frozen" for component in cost["components"].values())
 
 

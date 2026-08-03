@@ -560,13 +560,23 @@ Stress prompt 只在 primary prompt 全部为 null 的 NO-GO 分支中运行。
 
 6.4 Budget
 
-Primary budget sweep：
+Primary budget envelope（成本上界合同，不是提前读取结果后的最终选择）：
 
-B_grid:
+B_envelope:
+  - 128
+  - 192
+  - 256
+  - 384
   - 512
+  - 768
   - 1024
+  - 1536
   - 2048
+  - 3072
   - 4096
+
+M8 只能在该冻结包络内、读取 topology 结果前选择最终 `B_grid` 子集；
+任何新增预算点都必须重新生成成本上界并重新通过 Day 1 cost Gate。
 
 在每个预算点：
 

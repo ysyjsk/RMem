@@ -4,7 +4,8 @@
 
 1. Episode/construction unit: split, leaf, plan, and cluster unit.
 2. Query: task score unit, aggregated within episode.
-3. Operation item: v1.1 schema-only audit category, not a v1.0 Gate.
+3. Operation item: `eval-protocol-v1.1` schema-only audit category, not an
+   `eval-protocol-v1.0` Gate.
 
 ## Primary Dataset Contract
 
@@ -52,12 +53,19 @@ The real development episode `06db6396` covered all 51 timestamped sessions
 (133,100 surrogate tokens); two fp16 encode runs produced identical embedding,
 ranking, and packing hashes without exceeding the 8,192-token unit limit.
 
-Day 1 remains blocked: direct and `127.0.0.1:17897` model-inventory requests
-both returned HTTP 400 with empty response bodies. The provider credential is present
-and was loaded from the environment without being written to artifacts, but no
-authenticated inventory was returned, no different-family replication model is
-frozen, and the full provider-priced cost upper bound is not frozen. A subsequent offline rerun resolved the same frozen BGE-M3 weight from the repo-local
-cache and restored the current embedding artifact to passed without changing the
-model revision or SHA-256. MemoryAgentBench, LoCoMo, second-source qualification, judge
-repeatability, SATURATION-01, and all acceptance experiments remain pending.
-Full leaf generation therefore remains forbidden.
+Day 1 is passed for run `day1-383db20a02f9473294b2b632784e13b4`.
+The verified artifacts include model inventory, 115K input, 4096-token output,
+project judge, `gpt-5.4` replication, BGE-M3, and the direct/proxy network
+probe (`proxy_17897` returned HTTP 200). The cost artifact is provider-priced
+from the public LabForge pricing/status snapshot and covers the frozen upper
+workload envelope; it uses the maximum enabled group ratio because the API-key
+group is not part of auditable evidence. No model, judge, embedding, or
+Hugging Face gate was re-run during the cost refresh.
+
+The cost envelope is an upper bound, not a selected budget: the 11 registered
+candidate points are `[128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072,
+4096]`, and any later selected point must be a subset. Its conditional stress,
+online, SATURATION, D_leaf, and matched-capacity branches are recorded in
+`cost_upper_bound.json`. MemoryAgentBench, LoCoMo, second-source qualification,
+judge repeatability, SATURATION-01, and all acceptance experiments remain
+pending. Full leaf generation therefore remains forbidden.
