@@ -547,6 +547,24 @@ def test_day1_model_probes_record_canonical_115k_metrics_but_unknown_full_cost_b
         assert call["context_length_error"] is False
         assert call["silent_truncation_detected"] is False
 
+    primary_output = json.loads(
+        (tmp_path / "primary_output_probe.json").read_text(encoding="utf-8")
+    )
+    assert primary_output["status"] == "passed"
+    assert primary_output["role"] == "primary_output_4096"
+    assert primary_output["compression_budget_tokens"] == 4096
+    assert primary_output["requested_max_tokens"] == 4096
+    assert primary_output["wire_max_tokens_equals_compression_budget"] is True
+    assert primary_output["provider_exact_output_tokens"] is True
+    assert primary_output["observed_output_tokens_max"] <= 4096
+    assert primary_output["output_budget_contract"] == {
+        "scope": "direct_memory_compression_output_upper_bound",
+        "budget_tokens": 4096,
+        "wire_max_tokens": 4096,
+        "provider_usage_required": True,
+        "observed_output_tokens_lte_budget": True,
+    }
+
 
 def test_day1_can_pass_only_with_real_full_experiment_component_costs(tmp_path: Path) -> None:
     result = run_day1_probe(
@@ -566,6 +584,44 @@ def test_day1_can_pass_only_with_real_full_experiment_component_costs(tmp_path: 
     assert cost["pricing_source"] == "provider-pricing-2026-08-01"
     assert cost["monetary_upper_bound"] == 18.75
     assert all(component["status"] == "frozen" for component in cost["components"].values())
+
+
+def test_primary_output_probe_blocks_when_provider_output_tokens_exceed_4096(
+    tmp_path: Path,
+) -> None:
+    successful = _successful_request_fixture()
+
+    def over_budget_primary_output(url, **kwargs):
+        response, metadata = successful(url, **kwargs)
+        payload = kwargs.get("payload") or {}
+        if (
+            url.endswith(CHAT_COMPLETIONS_PATH)
+            and payload.get("model") == PRIMARY_MODEL
+            and payload.get("max_tokens") == 4096
+        ):
+            response["usage"] = {"prompt_tokens": 6000, "completion_tokens": 4097}
+        return response, metadata
+
+    result = run_day1_probe(
+        tmp_path,
+        request_fn=over_budget_primary_output,
+        api_key="test-key",
+        replication_model="replica-1",
+        embedding_revision="fixture-revision",
+        embedding_probe_fn=_canonical_embedding_fixture,
+        full_cost_inputs=_full_cost_inputs(),
+    )
+
+    assert result["status"] == "blocked"
+    primary_output = json.loads(
+        (tmp_path / "primary_output_probe.json").read_text(encoding="utf-8")
+    )
+    assert primary_output["status"] == "blocked"
+    assert primary_output["observed_output_tokens_max"] == 4097
+    assert primary_output["output_budget_contract"]["observed_output_tokens_lte_budget"] is False
+    assert primary_output["blocking_reason"] == (
+        "primary output compression probe must use max_tokens=4096 and observed provider output tokens must be <=4096"
+    )
 
 
 def test_115k_http_success_without_returned_sentinel_is_blocked(tmp_path: Path) -> None:
@@ -671,6 +727,9 @@ def test_judge_parses_json_labels_and_checks_fixed_expected_cases() -> None:
         assert payload["messages"] == [
             {"role": "user", "content": payload["messages"][0]["content"]}
         ]
+        assert payload["messages"][0]["content"].startswith(
+            "Return exactly one JSON object and nothing else"
+        )
         prompt = str(payload["messages"][0]["content"])
         return {
             "model": JUDGE_MODEL,
@@ -699,6 +758,7 @@ def test_judge_parses_json_labels_and_checks_fixed_expected_cases() -> None:
     assert result["parser_probe_success"] is True
     assert result["parser_success_rate"] == 1.0
     assert all(case["parser_success"] is True for case in result["cases"])
+    assert all(case["expected"] in {0, 1} for case in result["cases"])
     assert all(case["expected_match"] is not False for case in result["cases"])
 
 
