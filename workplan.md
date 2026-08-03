@@ -7,6 +7,7 @@
 - **阶段名称**：Phase 1 — Evaluation Protocol and Test-Set Construction
 - **唯一目标**：构造并冻结可复现、可审计、可证伪的测试集、测试指标、统计协议与测试原则
 - **开发范式**：Test-Driven Development（TDD）
+- **执行真相边界**：Proposal 负责科学 framing；本 Workplan、现有 schemas、`protocol/metric_spec_v1.md` 与 tests 共同构成唯一 execution source of truth。`修改建议-8.3.md` 合并后仅保留为决策记录，不得作为第二套执行文档
 - **本阶段禁止事项**：不设计最终方法；不优化研究方法；不运行正式 acceptance 实验；不根据 acceptance 结果选择数据、预算、阈值、prompt 或 baseline
 - **阶段完成标志**：全部 Gate 通过并发布不可变的 `eval-protocol-v1.0`，之后才能进入 feasibility pilot
 - **预计关键路径**：协议、数据/模型/检索结构审计与 harness 约 14–16 个工作日；随后完成独立的 `D_leaf` qualification micro-run，方可进入 feasibility pilot。第二模型与第二数据集的完整 replication 不计入第一阶段关键路径，但其选择、结构资格和预算必须在本阶段冻结。Gate 未通过时顺延，不以日期覆盖验收条件
@@ -58,11 +59,11 @@ budget 只作用于 internal/final merge，不作用于 leaf construction。
 - task quality；
 - plan robustness；
 - construction cost；
-- durable state amplification；
+- deployment state amplification；
 - prefix render/query cost；
 - latency。
 
-质量更好但依赖明显更大的 `O(B log n)` durable state，不自动视为“简单方案已完全解决”。
+质量更好但依赖明显更大的 `O(B log n)` deployment state，不自动视为“简单方案已完全解决”。
 
 ### E4. NO-GO 是顺序 Gate，不是一次 null 即终止
 
@@ -613,22 +614,67 @@ Query
 └── split
 ```
 
-### ViewNode
+### PlanNodeRaw
+
+`PlanNodeRaw` 只保存不可推导的逻辑树事实：
 
 ```text
-ViewNode
-├── node_id
-├── content
-├── covered_span
-├── provenance_evidence_ids
-├── parent_node_ids
-├── token_count
-├── capacity
-├── prompt_hash
-├── model_snapshot
-├── seed
-└── sha256
+PlanNodeRaw
+├── logical_node_id
+├── plan_id
+├── node_type                 # leaf / internal
+├── leaf_id                   # leaf only
+├── left_logical_child_id     # internal only
+├── right_logical_child_id    # internal only
+└── covered_span
 ```
+
+`descendant_leaf_ids`、`tree_level`、`depth_to_root`、role path 和
+`critical_path` 不得进入 raw schema；如为性能保留缓存，必须显式标记为
+derived cache，并用递归 child-edge rebuild 测试证明一致。
+
+### NodeArtifact
+
+`NodeArtifact` 是原 `ViewNode` 的唯一物化形式。它只引用稳定的
+`content_artifact_id`，不把本机绝对路径作为科学身份：
+
+```text
+NodeArtifact
+├── materialized_node_id / logical_node_id / run_id
+├── content_artifact_id / content_hash / artifact_kind
+├── memory_tokens_local / capacity_tokens
+├── tokenizer_snapshot / serialization_version / operator_config_id
+├── deterministic_operator_hash
+├── model_snapshot / prompt_hash / response_hash
+├── creation_event_type / creation_event_id
+├── schema_version / validation_status
+├── materialization_source    # generated / cache / deterministic
+└── artifact_status
+```
+
+`NodeArtifact` 不新增 `cache_source_artifact_id`。Generated、cache 和
+deterministic 的 lineage 分别由 accepted binding、creation event 和
+`deterministic_operator_hash` 验证。
+
+### ModelCallAttemptRaw
+
+所有 leaf、merge、answer、judge API 调用共用一套 raw attempt 记录。必须
+同时保存 local token 与 provider usage；`provider_usage_source` 只能是
+`provider_exact`、`provider_estimated` 或 `missing`。Missing 时 provider
+token 字段全部为 null，不得用 local count 冒充 provider usage。
+
+### AcceptedOutputBindingRaw
+
+Leaf、merge、answer、judge 的 accepted output 均通过同一 binding 对象绑定。
+成功 binding 与 accepted attempt 是一对一关系；`accepted_attempt` 若保留
+只能是该引用关系的派生缓存，不能成为第二个真相源。
+
+### MergeEventRaw
+
+Merge event 保存逻辑 merge、左右 materialized node、输出 node、预算和
+materialization source。Generated 必须引用 merge binding；cache 必须有
+`cache_source_artifact_id` 且不得伪造 API attempt；deterministic 不进入
+generative rewrite lineage。Merge event 不重复保存 NodeArtifact token 字段。
 
 ### Run
 
@@ -653,7 +699,13 @@ Run
 ├── s_answer
 ├── judge_config_hash
 ├── retrieval_config_hash
-├── artifact_hashes
+├── artifact_hashes / cost_artifact_id
+├── accepted_output_bindings / merge_events
+├── executor_config_hash / executor_mode / concurrency_limit
+├── cache_mode / rate_limit_policy_hash / retry_policy_hash / provider_route
+├── run_started_at / run_finished_at / replication_index
+├── execution_order_index / run_batch_id / provider_observation_window
+├── stage_timing_boundaries
 └── status
 ```
 
@@ -683,7 +735,7 @@ Plan
 ├── plan_set_id           # primary / diagnostic / online
 ├── k
 ├── leaf_ids
-├── ordered_merge_operations
+├── plan_nodes             # PlanNodeRaw child graph; scientific topology truth
 ├── online_or_offline
 ├── prefix_queryable
 ├── rebuild_interval
@@ -707,6 +759,17 @@ RetrievalConfig
 ├── index_version
 └── sha256
 ```
+
+### Protected label access boundary
+
+`ConstructionInputView` may read raw evidence, leaf configuration and plan
+edges, but not query, gold answer, or supporting labels. `AnswerInputView` may
+read final memory, query and answer configuration, but not gold/support labels.
+Only `ScoringInputView` may load the protected label store, and only after run
+artifacts and answers are frozen with an access log. The frozen mapping is
+`supporting session -> atomic evidence -> chunk -> leaf`; every annotation
+records `support_mapping_status` (`exact`, `expanded_to_chunks`, or
+`unresolved`) and mapped IDs. Summary aggregation uses unique supporting leaves.
 
 ## 5.2 随机因子与重复次数合同
 
@@ -766,10 +829,19 @@ s_answer = r
 - 跨 backbone 复用 leaf cache 必须失败；
 - formal Retain 缺少 retrieval config hash 必须失败；
 - embedding 或 replication model 使用 rolling alias 必须失败。
+- `PlanNodeRaw` 出现 depth、descendant leaves 或 role path 等派生字段必须失败；
+- `NodeArtifact` content reference 不可解析或写入本机绝对路径必须失败；
+- `NodeArtifact` 出现 `cache_source_artifact_id` 必须失败；
+- generated materialization 没有且仅有一个 accepted binding 必须失败；
+- cache/deterministic materialization 伪造 accepted API attempt 必须失败；
+- 一个 logical call 出现两个成功 bindings 必须失败；
+- construction/answer serializer 接触 gold/support labels 必须失败。
 
 ## 5.4 完成条件
 
-所有非法 fixture 被拒绝；合法 fixture 通过；ID、hash、seed 和 cache key 规则冻结。
+所有非法 fixture 被拒绝；合法 fixture 通过；ID、hash、seed、binding、creation
+event、protected-label access 和 cache key 规则冻结。Raw artifacts 删除所有
+derived tables 后仍能重建 PlanMetrics、resource work 和 support exposure。
 
 ---
 
@@ -1408,7 +1480,8 @@ Primary comparison 固定：
 
 方法专有 metadata：
 
-- 计入 durable state；
+- 按冻结 capability profile 计入 deployment state；共享 index/source state
+  另列，不得混入 plan-specific deployment state；
 - 进入 prompt 的部分计入 `B_query`；
 - 不得在成本表中隐去。
 
@@ -1574,6 +1647,30 @@ mu_(M, P2, B)
 - `Pi_diag` 保留 right-deep；
 - primary/replication backbone cache 隔离；
 - plan descriptor 显式记录 k 与 plan_set_id。
+
+## 11.7 T6 PlanMetrics 与 lineage 派生合同
+
+T6 的 `PlanMetrics` 必须由 `PlanNodeRaw` child edges 递归重建，不调用模型，
+也不读取 timestamps 重新排序。冻结字段为：
+
+```text
+descendant_leaf_ids
+leaf_depth_vector
+order_role_path_vector
+tree_height
+critical_path_merge_count
+merge_count
+deterministic_plan_hash
+```
+
+`earlier_span_fraction`、`later_span_fraction` 和 order-role sequence 只由
+frozen evidence order 与 covered spans 决定；`time_span_imbalance` 与
+`boundary_real_time_gap` 只有 event/valid time 质量足够时才报告，否则为
+`unavailable`。`generative_rewrite_depth` 只数 semantic path 上的
+generative merge operator，不受 cache hit、retry 或 failed attempt 影响。
+
+T6 必须同时能从 creation event、accepted binding 和 merge event 重建
+materialized lineage；任何失败 attempt 都不能进入 lineage。
 
 ---
 
@@ -1848,29 +1945,24 @@ effective_n = fraction_multiple_leaves × n
 
 H1 是 `Pi_primary` 的部署相关 paired contrast。
 
-若 `G-DEPTH-IDENTIFIABILITY` 通过，H2 使用 `Pi_diag` 的观测拟合 logistic mixed model 或 episode-clustered GEE：
-
-```text
-logit P(Y=1)
-  = beta0
-  + beta1 d_mean
-  + beta2 d_mean^2
-  + beta3 budget
-  + beta4 d_mean:budget
-  + plan_fixed_effect
-  + evidence_layout_stratum
-  + episode_effect
-```
+在 `eval-protocol-v1.0` 中不存在 confirmatory H2。若
+`G-DEPTH-IDENTIFIABILITY` 通过，使用 `Pi_diag` 的 PlanMetrics、
+EvidenceExposure 和 AnnotatedSupportExposure 做 episode-plan-run 内聚合，
+报告 episode-clustered uncertainty interval；若未通过，仍可展示 raw
+descriptors，但必须标为不可识别。
 
 规则：
 
-- `d_mean` 为主 depth variable；
-- `d_max`、`d_joint` 为 secondary；
-- `evidence_spans_multiple_leaves` 用于预注册分层/interaction，不是样本权重；
-- plan fixed effect 防止 depth 吸收全部 plan 差异；
-- right-deep 仅在机制模型和 diagnostic range 中使用；
-- H1 通过后，H2 才支持 confirmatory mechanism claim；
-- H1 未通过但 H2 通过，只能报告 exploratory association。
+- `d_mean`、`d_max`、`d_joint` 与 `generative_rewrite_depth` 均为 secondary；
+- `evidence_spans_multiple_leaves` 用于预注册分层，不是样本权重；
+- source features 与 materialized mediators 分开；
+- right-deep 仅进入 mechanism diagnostic 和 diagnostic range；
+- 不把不同 topology 的第 n 个 merge 直接配对；
+- 不用 post-treatment mediator 回归声称因果；
+- 不产生 confirmatory mechanism p-value，也不替代 H1 或进入 GO/NO-GO。
+
+若未来需要 logistic mixed model、episode-clustered GEE 或确认性机制 claim，
+必须在读取相应结果前作为 `eval-protocol-v1.1` 的独立分析计划预注册。
 
 Planned secondary k-sweep：
 
@@ -1921,28 +2013,39 @@ C_life = C_construct + C_query
 
 所有成本必须按 `backbone × k × budget × plan` 分层。
 
-Construction 记录：
+Construction 与 query 的 token usage 必须按 accepted-path 和 observed
+operational 两套字段保存。每套字段至少保留 total input、cached input
+subset、uncached input 和 output；
 
-- input/output tokens；
-- leaf/merge/embedding calls；
-- retry；
-- wall time、GPU seconds、monetary cost；
-- final memory tokens；
-- durable state bytes/tokens；
-- live node count；
-- provenance metadata；
-- compaction/write amplification。
+```text
+uncached_input = input_total - cached_input_subset
+```
 
-Query 记录：
+Observed work 还包括 API attempt count、failed attempt count、successful
+nonmaterialized count、accepted materialized generation count、cache hit、retry
+token/latency overhead、sum attempt latency、critical-path elapsed latency 和
+parallelism factor。`successful_nonmaterialized` 与 provider-executed failed
+attempt 可能有真实 token/latency，但不进入 materialized lineage。
 
-- retrieval/render calls；
-- rendered forest tokens；
-- final prompt/output tokens；
-- judge calls/cache hits；
-- latency；
-- repeated-query amortized cost。
+Construction 分为 shared leaf construction、plan-specific merge construction
+和 answer/query；judge usage 与 latency 单独归档，不并入 memory lifecycle
+cost。Missing provider usage 或 missing cost 必须是 `unknown`，不能默认为 0。
 
-Missing cost 必须是 `unknown`，不能默认为 0。
+状态成本不再使用模糊的 `durable_state_tokens`，而拆为：
+
+1. deployment state：`deployment_memory_tokens`、metadata bytes、冻结的
+   capability profile 与 measurement point；
+2. shared source state：`shared_leaf_tokens`、`shared_raw_evidence_bytes`；
+3. experiment artifact footprint：`artifact_cache_bytes`。
+
+Artifact footprint 只用于审计/复现，不进入 deployment lifecycle cost。Primary
+offline 默认 capability profile 为 `FINAL_QUERY_ONLY`；online track 的所有
+topology 必须使用相同 profile。
+
+美元费用是可选的 run-level `PricingManifest` 派生视图，费率统一为 USD per
+1M tokens，并保存 source access time、snapshot hash、provider/model/route 和
+usage schema。没有 PricingManifest 时 estimated USD 为 `unavailable`，但
+科学 resource metrics 仍可计算。
 
 ## 12.14 Online Balanced Pareto Gate
 
@@ -1950,7 +2053,7 @@ Missing cost 必须是 `unknown`，不能默认为 0。
 
 ```text
 (Delta_primary, D_diag, Q_mean, Q_worst, C_construct,
- durable_state, render_cost, query_latency)
+ deployment_memory_tokens, render_cost, query_latency)
 ```
 
 只有其关闭主要质量/方差差距且处于合理 Pareto 前沿，才算简单方法关闭空间。
@@ -1960,6 +2063,46 @@ Missing cost 必须是 `unknown`，不能默认为 0。
 `eval-protocol-v1.0` 仅保留 omission、stale、corruption、hallucination、preservation、faithfulness 的 schema 和分母定义。
 
 自动 judge、双人工标注和 adjudication 整体移到 `eval-protocol-v1.1`，不作为 `eval-protocol-v1.0` Gate。
+
+## 12.16 T7 Observability secondary diagnostics
+
+Phase 1 必选机制指标仅保留四类：
+
+1. structural exposure：leaf depth、generative rewrite depth、order-role
+   sequence、earlier/later span fraction、relative position；
+2. compression exposure：`content_to_budget_pressure`、`pressure_sum`、
+   `pressure_max`、`actual_compression_ratio`、`output_budget_utilization` 和
+   `payload_to_budget_ratio`；
+3. merge balance：`token_imbalance_abs`、`token_imbalance_signed`，以及在
+   时间字段可用时的 optional `time_span_imbalance`；
+4. resource/execution：上述 accepted-path/observed operational 字段和阶段
+   wall-clock。
+
+这些变量只作为 descriptive secondary diagnostics。每个
+episode-plan-run 先聚合，再报告 episode-clustered bootstrap interval；证据
+行不能膨胀样本量，不同 topology 的第 n 个 merge 不直接配对，不产生
+confirmatory p-value，也不进入任何 primary GO/NO-GO。
+
+机制字段的 canonical names 为 `order_role_sequence`、
+`earlier_span_fraction`、`later_span_fraction` 和
+`critical_path_merge_count`。`content_to_budget_pressure` 是结构代理，不
+证明 semantic retention。
+
+## 12.17 T7 support exposure 与访问边界
+
+Protected label store 的 gold answer/supporting evidence 只能在 scoring 阶段
+加载；construction 和 answer input view 必须拒绝这些字段。映射链固定为
+`supporting session -> atomic evidence -> chunk -> leaf`，每条 annotation
+保留 exact/expanded/unresolved 状态和映射 ID。正式 summary 按 unique
+supporting leaves 聚合，统一字段名：
+
+```text
+annotated_support_rewrite_mean
+annotated_support_rewrite_max
+annotated_support_pressure_mean
+annotated_support_pressure_max
+annotated_support_order_role_summary
+```
 
 # 13. 工作包 T8：Evaluator 资格验证与 Judge Cache
 
@@ -2009,6 +2152,37 @@ Day 1 必须记录：
 - official audit 不替换或改写项目内 `gpt-5.5` 冻结结果；
 - 不得自动回退到裸 `gpt-4o`。
 
+Evaluator Parity 的官方代码来源冻结为：
+
+```text
+LongMemEval
+repository = https://github.com/xiaowu0162/LongMemEval
+commit     = 9e0b455f4ef0e2ab8f2e582289761153549043fc
+path       = src/evaluation/evaluate_qa.py
+sha256     = ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251
+
+MemoryAgentBench
+repository = https://github.com/HUST-AI-HYZ/MemoryAgentBench
+commit     = 455306dcabc3842526eb83cd4e225e5d486c5c5d
+path       = utils/eval_other_utils.py
+sha256     = d77976be409298970614d477a9d8003850caddb0510e56a7e821a037d98493a2
+```
+
+真实 qualification 命令：
+
+```bash
+python -m plan_robust_memory.qualify_evaluator_parity
+```
+
+该命令按 direct -> `127.0.0.1:17897` 下载并核对官方源码，验证
+MemoryAgentBench normalization/substring semantics 与 LongMemEval 五类 prompt
+hash，同时复用已通过的 Day 1 inventory 和 judge probe，不重复外部 Gate。
+`gpt-4o-2024-08-06` 若不在已通过 inventory 中，必须记录
+`unavailable_external_limitation`，compatibility call count 为 0，且不得回退
+到 rolling `gpt-4o`。运行中或失败时只能依据
+`evaluator_parity_run_state.json` 的本次 `run_id` 判断状态，不得读取旧同名
+artifact 宣称本次通过或失败。
+
 
 ## 13.3 Judge Cache
 
@@ -2030,16 +2204,101 @@ sha256(
 
 ## 13.4 50 × 3 Repeatability
 
-从 development/calibration 构造 50 个固定 qualification cases，覆盖：
+为消除 P6/T3 与旧“development/calibration”措辞之间的自由裁量，Judge Repeatability 的唯一来源为冻结 20/30/50 划分中的 `Q_cal`；development 不进入该 50-case manifest，acceptance 不得读取。manifest 使用 selection
+seed `judge-repeatability-calibration-v1`，按 episode ID 的稳定 hash 排序，50
+个 case 必须来自 50 个不同 episode。类别互斥且配额冻结为：
 
-- gold-equivalent；
-- 明显错误；
-- 部分正确；
-- temporal/update；
-- 格式变化；
-- abstention-like answer。
+Judge qualification 前必须先由 data-steward 执行一次 calibration-only 投影：
 
-每个 case 独立 judge 3 次。
+```bash
+make materialize-longmemeval-calibration
+```
+
+该命令可以读取并扫描 combined `normalized_episodes.json`，但只能写出
+`normalized_calibration_20_30_50.json` 与
+`calibration_split_materialization_log.json`；投影必须绑定 dataset audit
+hash、power artifact hash、20/30/50 assignment hash、source SHA-256 和完整
+`Q_cal` episode ID 集合，并记录 `acceptance_payload_exported=false`。随后
+`python -m plan_robust_memory.qualify_judge_repeatability` 只允许读取这个
+calibration projection，禁止 `--normalized-episodes` 输入或任何 combined-store
+路径。projection 校验失败时不得发出请求。
+
+```text
+gold_equivalent = 8
+clearly_wrong = 8
+partial = 8
+temporal_reasoning = 7
+knowledge_update = 7
+formatting_variation = 6
+abstention_like = 6
+```
+
+`temporal_reasoning` 与 `knowledge_update` 必须分别来自对应 LongMemEval task
+type。gold-equivalent 使用 gold 等价答案；clearly-wrong 使用不包含 gold 的
+固定无关答案；partial 使用 gold 的确定性严格子片段；formatting variation
+只增加 answer framing；abstention-like 是对可回答 calibration question 的
+拒答式 candidate，不读取已排除的 `_abs` item。`expected_semantic_label` 只
+审计 case 构造，不进入 repeatability Gate，也不得被解释为人工一致性验证。
+
+每个 case 按 manifest 顺序独立调用 judge 3 次，replicate ID 严格为
+`0/1/2`，共 150 个唯一 `(case_id, replicate_id)` observation。调用固定为：
+
+```text
+endpoint = https://api.labforge.cc/v1/chat/completions
+model = gpt-5.5
+temperature = 0
+max_tokens = 128
+stream = false
+messages = exactly one user message
+response_format = not sent
+```
+
+项目 prompt wrapper 保留对应 LongMemEval official task semantics，只把官方
+yes/no 输出要求替换为严格 JSON `{"label":0|1}`；official yes/no parser 与
+项目 JSON parser 继续分离。每次先 direct；只有访问失败才使用
+`127.0.0.1:17897`，两次均失败立即停止本 Gate。
+
+真实命令为：
+
+```bash
+python -m plan_robust_memory.qualify_judge_repeatability
+```
+
+artifact contract 冻结为：
+
+```text
+judge_repeatability_case_manifest.json          immutable case source
+judge_repeatability_transport_attempts.jsonl    raw direct/proxy attempts
+judge_repeatability_attempts.jsonl              raw ModelCallAttemptRaw
+judge_repeatability_output_bindings.jsonl       raw AcceptedOutputBindingRaw
+judge_repeatability_outputs.jsonl               raw provider outputs
+judge_repeatability.json                        derived observations/metrics/decision
+judge_repeatability_run_state.json              current run identity/state/checksums
+judge_repeatability_stall.json                  current blocked-run evidence
+```
+
+`AcceptedOutputBindingRaw` 是 accepted judge output 的唯一真值。provider
+usage 与本地 surrogate token count 分离；缺少 provider cache subset 时保持
+provider usage unknown，不以零或本地计数代替。Judge work 仍是 evaluation
+overhead，不进入 memory lifecycle cost。运行中和运行结束后只能依据 `judge_repeatability_run_state.json` 中本次 `run_id` 及其 artifact checksum
+判断状态；不得读取旧同名 aggregate 宣称本次通过或失败。run-scoped raw
+文件在完成后才原子发布为 canonical artifacts。
+
+qualification CLI 的 preparation lifecycle 在首次读取 manifest、JSON 或
+upstream artifact 之前生成新的 `run_id`，并先写入
+`judge_repeatability_run_state.json`（`state=preparing`）。任何缺文件、坏 JSON、
+provenance/checksum 漂移或配额不足都必须写入同一 `run_id` 的
+`judge_repeatability_stall.json`，将 run-state 终结为 `blocked`，并把旧
+canonical 文件标为 `not_published_for_this_run`；这种失败不得留下
+`running` 状态，也不得推进 `cache_qualification`。
+
+三项指标分母固定为：
+
+```text
+unanimity_rate       = 三个 label 全相同的 case 数 / 50
+pairwise_flip_rate   = 不同 label 的无序 replicate pair 数 / (50 * C(3,2))
+parse_success_rate   = strict JSON parse 成功 observation 数 / 150
+```
 
 最低条件：
 
@@ -2057,6 +2316,12 @@ parse_success_rate   == 1.00
 4. 仍失败则 LongMemEval task score 不能用于 confirmatory result。
 
 Repeatability 只验证稳定性，不宣称 judge 对真实正确性的人工一致性；后者属于 `eval-protocol-v1.1`。
+
+任何少于或多于 50×3、重复 case/replicate、类别缺失、非二元 label、模型
+漂移、非 strict JSON 或跨 Day 1/evaluator-parity run evidence 都必须 fail
+closed 并写入本次 stall/run-state。只有三项阈值全部通过，qualification
+state 才从前两项的 ordered prefix 推进到 `cache_qualification`；无论通过
+与否，full-leaf generation 仍为 false。
 
 ## 13.5 Judge Blindness
 
@@ -2096,7 +2361,17 @@ token accounting、hash、split、partition、plan serialization、metric aggreg
 12. depth 与 plan 完全共线却仍被声明可识别；
 13. periodic reconstruction 启用但 interval 缺失；
 14. 外网代理不可达但下载脚本无限重试；
-15. 同一 Gate 重复失败却未生成 stall report。
+15. 同一 Gate 重复失败却未生成 stall report；
+16. PlanNodeRaw 含派生字段或 child span 无法重建；
+17. NodeArtifact 使用绝对路径或新增 cache source 字段；
+18. generated/cache/deterministic lineage 与 accepted binding 不一致；
+19. provider/local token、cached subset 或 reasoning subset 被混淆；
+20. accepted-path/observed work、judge overhead 和 shared leaf work 对账失败；
+21. support labels 泄漏到 construction/answer 或重复加权 supporting leaf；
+22. formal executor/cache/retry/rate-limit/route 不一致或 stage wall-clock 边界
+    不可重建；
+23. full-leaf guard 在 Observability Freeze、SATURATION-01、protocol tag 或
+    Q0/D_leaf 之前错误放行。
 
 ## L4 Dataset Qualification
 
@@ -2158,7 +2433,67 @@ build-judge-qualification-cache
 
 所有确定性 artifact checksum 相同。
 
+## 14.1 Observability raw-to-derived tests
+
+在第一次高成本 full-leaf 构建前，以下测试属于现有 T9/G-REPRO 的阻塞项：
+
+- 删除 derived tables 后可从 raw artifacts 重建 PlanMetrics、merge metrics、
+  accepted/observed work 和 support exposure；
+- PlanNodeRaw child graph 合法，order role 与 critical path 可重建；
+- generated materialization 恰好一个 accepted binding；cache 不伪造 API
+  attempt；deterministic 不进入 generative rewrite lineage；
+- failed 与 successful-nonmaterialized attempt 不进入 materialized lineage；
+- cached input 是 total input 的子集且不会重复计数；reasoning token 不被
+  作为额外 output 计数；
+- provider usage missing 保留为 unknown，不能被 local token 或零替代；
+- accepted-path 与 observed operational work 可对账，shared leaf 不跨 plan
+  重复；judge overhead 不进入 lifecycle cost；
+- support labels 无法进入 construction/answer view，support mapping 状态显式
+  且 unique-leaf aggregation 可重建；
+- formal topology runs 使用相同 executor/cache/retry/rate-limit/route，阶段
+  wall-clock 边界一致。
+
+## 14.2 Observability Freeze 与 full-leaf 入口顺序
+
+Observability Freeze 不是 full experiment ready，也不是新增顶层 Gate。唯一
+进入顺序冻结为：
+
+```text
+Observability Freeze
+-> Evaluator Parity
+-> Judge Repeatability
+-> Cache Qualification
+-> SATURATION-01
+-> Final Judge/Budget Freeze
+-> eval-protocol-v1.0
+-> Q0/D_leaf micro-run
+-> Full Leaves
+```
+
+现有 full-leaf guard 必须拒绝缺少上述任一前置状态、顺序错乱或 Q0/D_leaf
+未通过的调用。`修改建议-8.3.md` 在合并后只作为 freeze decision record，
+不具有执行权威。
+
 # 15. 严格执行顺序
+
+本节的唯一高成本进入顺序如下，milestone 编号和并行的只读数据审计不得
+被解释为允许跳步：
+
+```text
+Observability Freeze
+-> Evaluator Parity
+-> Judge Repeatability
+-> Cache Qualification
+-> SATURATION-01
+-> Final Judge/Budget Freeze
+-> eval-protocol-v1.0
+-> Q0/D_leaf micro-run
+-> Full Leaves
+```
+
+Observability Freeze 只表示 raw/derived/schema/metric/tests 合同已经冻结，不
+表示实验 ready。以上步骤继续由既有 G-PLAN、G-COST、G-EVAL、G-BUDGET 和
+G-REPRO 验收，不新增顶层 Gate。
 
 ## M-1：Phase 0 最终修订与可行性 Gate
 
@@ -2254,7 +2589,9 @@ Day 1 若样本量、模型窗口、不同家族 replication model、embedding r
 
 ## M1：Schema 与术语
 
-实现 T0，冻结 ID/hash/seed/repeat/cache/capacity/k/plan-set/backbone/retrieval 合同。
+实现 T0，冻结 ID/hash/seed/repeat/cache/capacity/k/plan-set/backbone/retrieval
+合同，以及 PlanNodeRaw、NodeArtifact、ModelCallAttemptRaw、
+AcceptedOutputBindingRaw、MergeEventRaw 和 protected-label boundary。
 
 ## M2：LongMemEval 只读审计与 Adapter
 
@@ -2286,9 +2623,30 @@ Day 1 若样本量、模型窗口、不同家族 replication model、embedding r
 
 若 G-POWER-FEASIBILITY 不通过，不进入 M4。
 
+## M3.5：Observability Freeze
+
+在任何 evaluator qualification、SATURATION 或 leaf generation 前，以 TDD
+完成 T0/T6/T7/T9 的 raw/derived contract、现有 schema 就地升级、metric
+specification 与 full-leaf blocking tests。该 milestone 不读取 acceptance，
+不产生模型调用，不新增 workload/method/primary metric/top-level Gate。
+
 ## M4：Evaluator Wrapper 与 Repeatability
 
-完成 official compatibility、snapshot pin、50×3 test 和 judge cache。Project judge 已在 Day 1 探活，本阶段不得临时换模型；official compatibility audit 单独记录。
+严格按以下内部顺序完成：
+
+1. Evaluator Parity：official compatibility 与 deterministic wrapper parity；
+2. Judge Repeatability：snapshot pin 与 50×3 test；
+3. Cache Qualification：judge cache key、blindness 和 deterministic replay。
+
+Project judge 已在 Day 1 探活，本阶段不得临时换模型；official compatibility
+audit 单独记录。前一项未通过不得进入后一项。
+
+当前状态（2026-08-03）：Evaluator Parity 已由 run
+`evaluator-parity-cdc9dc290e214da2bab361283dd163bd` 通过。两份官方源码
+checksum、6 个 deterministic cases 与 5 个 LongMemEval prompt hashes 全部
+一致；official dated GPT-4o snapshot 不在已通过的 Day 1 inventory 中，已按
+规则记录外部限制且没有 fallback。Judge Repeatability 与 Cache
+Qualification 尚未开始，full leaves 仍禁止。
 
 ## M5：Secondary Data Structural Audits
 
@@ -2355,12 +2713,13 @@ Day 1 若样本量、模型窗口、不同家族 replication model、embedding r
 - power estimator；
 - GO/NO-GO/equivalence logic；
 - G-DEPTH-IDENTIFIABILITY；
-- depth model code；
+- descriptive depth/rewrite/pressure/order-role exposure aggregation；
 - D_leaf protocol。
 
 ## M11：Protocol Qualification 与 Freeze
 
-空目录复现、全量 CI、qualification reports、checksums，发布：
+SATURATION-01 通过后先完成 Final Judge/Budget Freeze，再执行空目录复现、
+全量 CI、qualification reports 和 checksums，最后发布：
 
 ```text
 eval-protocol-v1.0
@@ -2625,14 +2984,27 @@ Q0 的实际时间由模型吞吐决定，不承诺包含在 14 个工作日内�
 - no future read；
 - prefix queryable；
 - periodic reconstruction interval 合同明确；
-- prompt/operator config 冻结。
+- prompt/operator config 冻结；
+- logical child graph 合法，`PlanMetrics` 可完全从 `PlanNodeRaw` 重建；
+- order-role path 由 frozen evidence order 得到；
+- `critical_path_merge_count` 与递归 tree height 一致；
+- cache hit 不改变 `generative_rewrite_depth`。
 
 ## G-COST
 
 - construction/query 分开；
-- durable state、render cost、query latency 可记录；
+- provider/local token 字段分离，`provider_usage_source` 与
+  `usage_schema_version` 存在；
+- cached input 是 total input 的子集，reasoning 是 output 的子集，二者均不
+  重复计数；
+- accepted-path 与 observed operational work 可分离、可对账；
+- shared leaf、plan-specific merge、answer 和 judge overhead 可分离；
+- deployment state、shared source state 与 artifact footprint 不混淆，Primary
+  Pareto 使用 `deployment_memory_tokens`；
+- render cost、query latency 与四阶段 wall-clock 可记录；
 - SATURATION 和 D_leaf 有独立预算；
-- missing cost 不记零。
+- missing usage/cost 是 unknown，不记零；
+- PricingManifest 缺失时 estimated USD 为 unavailable，不记零。
 
 ## G-PROGRESS
 
@@ -2645,6 +3017,16 @@ Q0 的实际时间由模型吞吐决定，不承诺包含在 14 个工作日内�
 
 - clean rebuild checksum 一致；
 - prompts/models/seeds/cache/power artifact 可恢复；
+- derived metrics 可从 raw artifacts 重建；
+- `AcceptedOutputBindingRaw` 是 accepted output 唯一真值，creation event 是
+  materialization lineage 唯一来源；
+- failed/nonmaterialized attempts 不进入 lineage，cache 不伪造 attempt；
+- support labels 未进入 construction/answer artifacts，support mapping 与
+  unique-leaf aggregation 可重建；
+- tokenizer、serialization、executor/cache/retry/rate-limit/route config 在
+  formal topology comparison 中一致；
+- stage wall-clock boundaries、cumulative attempt work、critical path 与
+  parallelism factor 可重建；
 - CI 与目标机器通过。
 
 所有 Gate 通过才能冻结 protocol；Q0 通过后才能进入 pilot。
@@ -2682,6 +3064,9 @@ tests/unit/test_k_axis_contract.py
 tests/unit/test_plan_set_contract.py
 tests/unit/test_backbone_bundle_schema.py
 tests/unit/test_retrieval_config_schema.py
+tests/unit/test_observability_contract.py
+tests/unit/test_observability_schemas.py
+tests/observability/test_contracts.py
 
 tests/property/test_contiguous_partition.py
 tests/property/test_partition_formula_uses_k.py
@@ -2760,6 +3145,10 @@ pytest \
   tests/unit/test_primary_budget_axis.py \
   tests/unit/test_k_axis_contract.py \
   tests/unit/test_plan_set_contract.py \
+  tests/unit/test_observability_contract.py \
+  tests/unit/test_observability_schemas.py \
+  tests/observability/test_contracts.py \
+  tests/integration/test_no_leaves_before_gates.py \
   tests/statistics/test_power_uses_independent_episode_count.py \
   tests/statistics/test_null_matches_r_run_mean.py \
   -q
@@ -2817,8 +3206,27 @@ pytest \
 - [ ] paired permutation 有 block-preservation test；
 - [ ] formal NO-GO 依赖 power + CI/equivalence；
 - [ ] operation-level audit 明确标为 `eval-protocol-v1.1`；
-- [ ] durable-state/render cost 进入 online-balanced Gate；
+- [ ] deployment-state/render cost 进入 online-balanced Gate；
 - [ ] cost logger 无 silent zero；
+- [ ] PlanNodeRaw/NodeArtifact/ModelCallAttemptRaw/AcceptedOutputBindingRaw/
+  MergeEventRaw 的 raw schema 与 cross-object validators 全绿；
+- [ ] PlanMetrics、MergeEventMetrics、accepted/observed work 和 support exposure
+  可由 raw artifacts 完整重建；
+- [ ] cache lineage 只来自 creation event，NodeArtifact 没有
+  `cache_source_artifact_id`；
+- [ ] provider/local token、cached/reasoning subset、unknown 与 optional USD
+  口径通过回归测试；
+- [ ] deployment/shared/artifact state、judge overhead 与 memory lifecycle cost
+  边界通过回归测试；
+- [ ] ConstructionInputView、AnswerInputView 和 ScoringInputView label access
+  boundary 通过测试；
+- [ ] formal executor/cache/retry/rate-limit/route 与 stage wall-clock contract
+  通过测试；
+- [ ] mechanism diagnostics 只报告 episode-clustered interval，不产生
+  confirmatory p-value；
+- [ ] Observability Freeze -> Evaluator Parity -> Judge Repeatability -> Cache
+  Qualification -> SATURATION-01 -> Final Judge/Budget Freeze ->
+  `eval-protocol-v1.0` -> Q0/D_leaf -> Full Leaves 的状态链完整且顺序正确；
 - [ ] progress log 与 stall escalation 已实现；
 - [ ] clean rebuild checksum 一致；
 - [ ] prompts、models、configs、cache、power artifact 已归档；
@@ -2910,12 +3318,16 @@ Primary prompt 下至少一个 signal-bearing budget 同时满足：
 
 ## 21.4 Rewrite-depth Mechanism
 
-- H1 topology omnibus 是 primary；
-- H2 depth mechanism 只有在 G-DEPTH-IDENTIFIABILITY 通过后才运行；
-- H1 通过且 H2 通过：支持 rewrite exposure 机制；
-- H1 通过、H2 不通过：说明 plan effect 存在，但当前 depth 定义不足；
-- H1 不通过、H2 通过：仅 exploratory/operator-contingent association；
-- 不得用 H2 的显著性替代低功效的 H1；
+- H1 `Delta_primary` paired contrast 是 primary；
+- depth/rewrite/pressure/order-role 指标只做 episode-clustered descriptive
+  diagnostics，不产生 confirmatory p-value；
+- H1 通过且 exposure pattern 一致：只能报告 mechanism-consistent pattern，
+  不能声称确认性因果机制；
+- H1 通过但 exposure pattern 不一致：说明 plan effect 存在，但当前机制
+  descriptor 不足；
+- H1 不通过但 exposure pattern 存在：仅 exploratory/operator-contingent
+  association；
+- 不得用 mechanism diagnostic 替代低功效的 H1；
 - 不得把重复观测行数称为独立样本数。
 
 
@@ -2959,7 +3371,9 @@ LoCoMo 可以执行为 cross-source stress replication，但 cluster 数按 10 c
 
 ## 21.8 Online Balanced Gate
 
-即使 topology effect 成立，若 online canonical balanced 在质量、鲁棒性、durable state、render cost 和 latency 的 Pareto 上已关闭空间，则停止复杂方法路线或转为 analysis/benchmark。
+即使 topology effect 成立，若 online canonical balanced 在质量、鲁棒性、
+deployment state、render cost 和 latency 的 Pareto 上已关闭空间，则停止复杂
+方法路线或转为 analysis/benchmark。
 
 ## 21.9 执行停滞处理
 

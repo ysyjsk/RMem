@@ -6,6 +6,18 @@ from plan_robust_memory.contracts import ContractError
 from plan_robust_memory.gates import assert_full_leaf_generation_allowed
 
 
+QUALIFICATION_SEQUENCE = [
+    "observability_freeze",
+    "evaluator_parity",
+    "judge_repeatability",
+    "cache_qualification",
+    "saturation_01",
+    "final_judge_budget_freeze",
+    "eval_protocol_v1_0",
+    "q0_d_leaf_micro_run",
+]
+
+
 def _passing_gate_artifacts() -> tuple[dict, dict, dict]:
     day1 = {"status": "passed"}
     data = {
@@ -36,6 +48,16 @@ def _passing_gate_artifacts() -> tuple[dict, dict, dict]:
     return day1, data, power
 
 
+def _passing_protocol_qualification() -> dict:
+    return {
+        "status": "passed",
+        "qualification_sequence": QUALIFICATION_SEQUENCE,
+        "completed_stages": QUALIFICATION_SEQUENCE,
+        "protocol_tag": "eval-protocol-v1.0",
+        "full_leaf_generation_allowed": True,
+    }
+
+
 def test_full_leaf_generation_is_blocked_until_all_three_gates_pass() -> None:
     day1 = {"status": "blocked"}
     data = {"status": "qualified_with_exclusions", "counts": {"N8": 20}}
@@ -44,9 +66,39 @@ def test_full_leaf_generation_is_blocked_until_all_three_gates_pass() -> None:
         assert_full_leaf_generation_allowed(day1, data, power)
 
 
-def test_full_leaf_generation_can_only_open_after_all_three_gates_pass() -> None:
+def test_full_leaf_generation_remains_blocked_without_protocol_qualification() -> None:
     day1, data, power = _passing_gate_artifacts()
-    assert_full_leaf_generation_allowed(day1, data, power)
+    with pytest.raises(ContractError, match="qualification"):
+        assert_full_leaf_generation_allowed(day1, data, power)
+
+
+def test_full_leaf_generation_can_only_open_after_ordered_qualification() -> None:
+    day1, data, power = _passing_gate_artifacts()
+    assert_full_leaf_generation_allowed(
+        day1, data, power, _passing_protocol_qualification()
+    )
+
+
+def test_full_leaf_generation_rejects_reordered_qualification() -> None:
+    day1, data, power = _passing_gate_artifacts()
+    qualification = _passing_protocol_qualification()
+    qualification["qualification_sequence"] = [
+        "observability_freeze",
+        "judge_repeatability",
+        "evaluator_parity",
+        *QUALIFICATION_SEQUENCE[3:],
+    ]
+    with pytest.raises(ContractError, match="entry order"):
+        assert_full_leaf_generation_allowed(day1, data, power, qualification)
+
+
+def test_full_leaf_generation_requires_q0_d_leaf_micro_run() -> None:
+    day1, data, power = _passing_gate_artifacts()
+    qualification = _passing_protocol_qualification()
+    qualification["completed_stages"] = QUALIFICATION_SEQUENCE[:-1]
+    qualification["full_leaf_generation_allowed"] = False
+    with pytest.raises(ContractError, match="Q0/D_leaf"):
+        assert_full_leaf_generation_allowed(day1, data, power, qualification)
 
 
 def test_expanded_n8_cannot_substitute_for_empty_primary_e8() -> None:

@@ -1,19 +1,339 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Cost",
+  "title": "Lifecycle Cost and ModelCallAttemptRaw log",
   "type": "object",
-  "required": ["cost_id", "backbone_id", "k", "budget_id", "plan_id", "C_construct", "C_query"],
+  "additionalProperties": false,
+  "required": [
+    "cost_id",
+    "run_id",
+    "backbone_id",
+    "k",
+    "budget_id",
+    "plan_id",
+    "model_call_attempts",
+    "accepted_path",
+    "observed_operational",
+    "judge_overhead",
+    "deployment_memory_tokens",
+    "deployment_metadata_bytes",
+    "deployment_capability_profile",
+    "deployment_state_measurement_protocol",
+    "deployment_state_measurement_point",
+    "shared_leaf_tokens",
+    "shared_raw_evidence_bytes",
+    "artifact_cache_bytes",
+    "C_construct",
+    "C_query",
+    "pricing_manifest",
+    "estimated_api_cost_usd"
+  ],
   "properties": {
-    "cost_id": {"type": "string"},
-    "backbone_id": {"type": "string"},
+    "cost_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "backbone_id": {"type": "string", "minLength": 1},
     "k": {"enum": [4, 8, 16]},
-    "budget_id": {"type": "string"},
-    "plan_id": {"type": "string"},
-    "C_construct": {"oneOf": [{"type": "number", "minimum": 0}, {"const": "unknown"}]},
-    "C_query": {"oneOf": [{"type": "number", "minimum": 0}, {"const": "unknown"}]},
-    "durable_state_tokens": {"oneOf": [{"type": "integer", "minimum": 0}, {"const": "unknown"}]},
-    "render_cost_tokens": {"oneOf": [{"type": "integer", "minimum": 0}, {"const": "unknown"}]},
-    "query_latency_ms": {"oneOf": [{"type": "number", "minimum": 0}, {"const": "unknown"}]}
+    "budget_id": {"type": "string", "minLength": 1},
+    "plan_id": {"type": "string", "minLength": 1},
+    "model_call_attempts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/ModelCallAttemptRaw"}
+    },
+    "accepted_path": {"$ref": "#/$defs/AcceptedPathResources"},
+    "observed_operational": {"$ref": "#/$defs/ObservedOperationalResources"},
+    "judge_overhead": {"$ref": "#/$defs/JudgeResources"},
+    "deployment_memory_tokens": {"type": "integer", "minimum": 0},
+    "deployment_metadata_bytes": {"type": "integer", "minimum": 0},
+    "deployment_capability_profile": {
+      "enum": [
+        "FINAL_QUERY_ONLY",
+        "FINAL_QUERY_AND_APPEND",
+        "PREFIX_QUERY_AND_APPEND",
+        "FULL_ONLINE_RECOVERY"
+      ]
+    },
+    "deployment_state_measurement_protocol": {"type": "string", "minLength": 1},
+    "deployment_state_measurement_point": {"type": "string", "minLength": 1},
+    "shared_leaf_tokens": {"type": "integer", "minimum": 0},
+    "shared_raw_evidence_bytes": {"type": "integer", "minimum": 0},
+    "artifact_cache_bytes": {"type": "integer", "minimum": 0},
+    "C_construct": {"$ref": "#/$defs/nonnegativeOrUnknown"},
+    "C_query": {"$ref": "#/$defs/nonnegativeOrUnknown"},
+    "pricing_manifest": {
+      "oneOf": [{"$ref": "#/$defs/PricingManifest"}, {"type": "null"}]
+    },
+    "estimated_api_cost_usd": {
+      "oneOf": [{"type": "number", "minimum": 0}, {"const": "unavailable"}]
+    },
+    "render_cost_tokens": {"$ref": "#/$defs/nonnegativeIntegerOrUnknown"},
+    "query_latency_ms": {"$ref": "#/$defs/nonnegativeOrUnknown"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"pricing_manifest": {"type": "null"}}},
+      "then": {"properties": {"estimated_api_cost_usd": {"const": "unavailable"}}}
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "tokenValue": {
+      "oneOf": [{"type": "integer", "minimum": 0}, {"const": "unknown"}]
+    },
+    "nonnegativeOrUnknown": {
+      "oneOf": [{"type": "number", "minimum": 0}, {"const": "unknown"}]
+    },
+    "nonnegativeIntegerOrUnknown": {
+      "oneOf": [{"type": "integer", "minimum": 0}, {"const": "unknown"}]
+    },
+    "AcceptedPathResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shared_leaf_input_tokens_total",
+        "shared_leaf_cached_input_tokens_subset",
+        "shared_leaf_uncached_input_tokens",
+        "shared_leaf_output_tokens",
+        "accepted_merge_input_tokens_total",
+        "accepted_merge_cached_input_tokens_subset",
+        "accepted_merge_uncached_input_tokens",
+        "accepted_merge_output_tokens",
+        "accepted_answer_input_tokens_total",
+        "accepted_answer_cached_input_tokens_subset",
+        "accepted_answer_uncached_input_tokens",
+        "accepted_answer_output_tokens"
+      ],
+      "properties": {
+        "shared_leaf_input_tokens_total": {"$ref": "#/$defs/tokenValue"},
+        "shared_leaf_cached_input_tokens_subset": {"$ref": "#/$defs/tokenValue"},
+        "shared_leaf_uncached_input_tokens": {"$ref": "#/$defs/tokenValue"},
+        "shared_leaf_output_tokens": {"$ref": "#/$defs/tokenValue"},
+        "accepted_merge_input_tokens_total": {"$ref": "#/$defs/tokenValue"},
+        "accepted_merge_cached_input_tokens_subset": {"$ref": "#/$defs/tokenValue"},
+        "accepted_merge_uncached_input_tokens": {"$ref": "#/$defs/tokenValue"},
+        "accepted_merge_output_tokens": {"$ref": "#/$defs/tokenValue"},
+        "accepted_answer_input_tokens_total": {"$ref": "#/$defs/tokenValue"},
+        "accepted_answer_cached_input_tokens_subset": {"$ref": "#/$defs/tokenValue"},
+        "accepted_answer_uncached_input_tokens": {"$ref": "#/$defs/tokenValue"},
+        "accepted_answer_output_tokens": {"$ref": "#/$defs/tokenValue"}
+      }
+    },
+    "ObservedOperationalResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed_leaf_input_tokens_total",
+        "observed_leaf_cached_input_tokens_subset",
+        "observed_leaf_uncached_input_tokens",
+        "observed_leaf_output_tokens",
+        "observed_merge_input_tokens_total",
+        "observed_merge_cached_input_tokens_subset",
+        "observed_merge_uncached_input_tokens",
+        "observed_merge_output_tokens",
+        "observed_answer_input_tokens_total",
+        "observed_answer_cached_input_tokens_subset",
+        "observed_answer_uncached_input_tokens",
+        "observed_answer_output_tokens",
+        "api_attempt_count",
+        "failed_api_attempt_count",
+        "successful_nonmaterialized_attempt_count",
+        "accepted_materialized_generation_count",
+        "cache_hit_count",
+        "retry_token_overhead",
+        "retry_latency_overhead",
+        "sum_attempt_latency",
+        "critical_path_elapsed_latency",
+        "parallelism_factor"
+      ],
+      "properties": {
+        "observed_leaf_input_tokens_total": {"$ref": "#/$defs/tokenValue"},
+        "observed_leaf_cached_input_tokens_subset": {"$ref": "#/$defs/tokenValue"},
+        "observed_leaf_uncached_input_tokens": {"$ref": "#/$defs/tokenValue"},
+        "observed_leaf_output_tokens": {"$ref": "#/$defs/tokenValue"},
+        "observed_merge_input_tokens_total": {"$ref": "#/$defs/tokenValue"},
+        "observed_merge_cached_input_tokens_subset": {"$ref": "#/$defs/tokenValue"},
+        "observed_merge_uncached_input_tokens": {"$ref": "#/$defs/tokenValue"},
+        "observed_merge_output_tokens": {"$ref": "#/$defs/tokenValue"},
+        "observed_answer_input_tokens_total": {"$ref": "#/$defs/tokenValue"},
+        "observed_answer_cached_input_tokens_subset": {"$ref": "#/$defs/tokenValue"},
+        "observed_answer_uncached_input_tokens": {"$ref": "#/$defs/tokenValue"},
+        "observed_answer_output_tokens": {"$ref": "#/$defs/tokenValue"},
+        "api_attempt_count": {"type": "integer", "minimum": 0},
+        "failed_api_attempt_count": {"type": "integer", "minimum": 0},
+        "successful_nonmaterialized_attempt_count": {"type": "integer", "minimum": 0},
+        "accepted_materialized_generation_count": {"type": "integer", "minimum": 0},
+        "cache_hit_count": {"type": "integer", "minimum": 0},
+        "retry_token_overhead": {"$ref": "#/$defs/tokenValue"},
+        "retry_latency_overhead": {"$ref": "#/$defs/nonnegativeOrUnknown"},
+        "sum_attempt_latency": {"$ref": "#/$defs/nonnegativeOrUnknown"},
+        "critical_path_elapsed_latency": {"$ref": "#/$defs/nonnegativeOrUnknown"},
+        "parallelism_factor": {"$ref": "#/$defs/nonnegativeOrUnknown"}
+      }
+    },
+    "JudgeResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted_judge_input_tokens_total",
+        "accepted_judge_cached_input_tokens_subset",
+        "accepted_judge_uncached_input_tokens",
+        "accepted_judge_output_tokens",
+        "observed_judge_input_tokens_total",
+        "observed_judge_cached_input_tokens_subset",
+        "observed_judge_uncached_input_tokens",
+        "observed_judge_output_tokens"
+      ],
+      "properties": {
+        "accepted_judge_input_tokens_total": {"$ref": "#/$defs/tokenValue"},
+        "accepted_judge_cached_input_tokens_subset": {"$ref": "#/$defs/tokenValue"},
+        "accepted_judge_uncached_input_tokens": {"$ref": "#/$defs/tokenValue"},
+        "accepted_judge_output_tokens": {"$ref": "#/$defs/tokenValue"},
+        "observed_judge_input_tokens_total": {"$ref": "#/$defs/tokenValue"},
+        "observed_judge_cached_input_tokens_subset": {"$ref": "#/$defs/tokenValue"},
+        "observed_judge_uncached_input_tokens": {"$ref": "#/$defs/tokenValue"},
+        "observed_judge_output_tokens": {"$ref": "#/$defs/tokenValue"}
+      }
+    },
+    "ModelCallAttemptRaw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id",
+        "run_id",
+        "stage",
+        "logical_call_id",
+        "accepted_attempt",
+        "retry_index",
+        "requested_model",
+        "returned_model",
+        "provider",
+        "provider_route",
+        "request_id",
+        "prompt_hash",
+        "response_hash",
+        "local_serialized_input_tokens",
+        "local_output_content_tokens",
+        "tokenizer_snapshot",
+        "serialization_version",
+        "provider_input_tokens_total",
+        "provider_cached_input_tokens_subset",
+        "provider_output_tokens_total",
+        "provider_reasoning_tokens_subset",
+        "usage_schema_version",
+        "provider_usage_source",
+        "scheduled_at",
+        "started_at",
+        "finished_at",
+        "http_status",
+        "finish_reason",
+        "parse_status",
+        "failure_type",
+        "attempt_outcome",
+        "status"
+      ],
+      "properties": {
+        "attempt_id": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "minLength": 1},
+        "stage": {"enum": ["leaf", "merge", "answer", "judge"]},
+        "logical_call_id": {"type": "string", "minLength": 1},
+        "accepted_attempt": {"type": "boolean", "readOnly": true},
+        "retry_index": {"type": "integer", "minimum": 0},
+        "requested_model": {"type": "string", "minLength": 1},
+        "returned_model": {"type": "string", "minLength": 1},
+        "provider": {"type": "string", "minLength": 1},
+        "provider_route": {"type": "string", "minLength": 1},
+        "request_id": {"type": "string", "minLength": 1},
+        "prompt_hash": {"$ref": "#/$defs/sha256"},
+        "response_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "local_serialized_input_tokens": {"type": "integer", "minimum": 0},
+        "local_output_content_tokens": {"type": "integer", "minimum": 0},
+        "tokenizer_snapshot": {"type": "string", "minLength": 1},
+        "serialization_version": {"type": "string", "minLength": 1},
+        "provider_input_tokens_total": {"type": ["integer", "null"], "minimum": 0},
+        "provider_cached_input_tokens_subset": {"type": ["integer", "null"], "minimum": 0},
+        "provider_output_tokens_total": {"type": ["integer", "null"], "minimum": 0},
+        "provider_reasoning_tokens_subset": {"type": ["integer", "null"], "minimum": 0},
+        "usage_schema_version": {"type": "string", "minLength": 1},
+        "provider_usage_source": {"enum": ["provider_exact", "provider_estimated", "missing"]},
+        "scheduled_at": {"type": "string", "format": "date-time"},
+        "started_at": {"type": ["string", "null"], "format": "date-time"},
+        "finished_at": {"type": ["string", "null"], "format": "date-time"},
+        "http_status": {"type": ["integer", "null"], "minimum": 100, "maximum": 599},
+        "finish_reason": {"type": ["string", "null"]},
+        "parse_status": {"type": "string", "minLength": 1},
+        "failure_type": {"type": ["string", "null"]},
+        "attempt_outcome": {
+          "enum": [
+            "accepted_materialized",
+            "successful_nonmaterialized",
+            "failed_provider",
+            "failed_parse",
+            "failed_validation",
+            "cancelled_before_start",
+            "cancelled_after_start"
+          ]
+        },
+        "status": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"provider_usage_source": {"const": "missing"}}},
+          "then": {
+            "properties": {
+              "provider_input_tokens_total": {"const": null},
+              "provider_cached_input_tokens_subset": {"const": null},
+              "provider_output_tokens_total": {"const": null},
+              "provider_reasoning_tokens_subset": {"const": null}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"provider_usage_source": {"enum": ["provider_exact", "provider_estimated"]}}},
+          "then": {
+            "properties": {
+              "provider_input_tokens_total": {"type": "integer", "minimum": 0},
+              "provider_cached_input_tokens_subset": {"type": "integer", "minimum": 0},
+              "provider_output_tokens_total": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      ]
+    },
+    "PricingManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pricing_manifest_id",
+        "pricing_manifest_sha256",
+        "provider",
+        "model",
+        "provider_route",
+        "usage_schema_version",
+        "currency",
+        "effective_date",
+        "source",
+        "source_accessed_at",
+        "source_snapshot_hash",
+        "uncached_input_usd_per_million",
+        "cached_input_usd_per_million",
+        "output_usd_per_million",
+        "request_fee_usd"
+      ],
+      "properties": {
+        "pricing_manifest_id": {"type": "string", "minLength": 1},
+        "pricing_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "provider": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "provider_route": {"type": "string", "minLength": 1},
+        "usage_schema_version": {"type": "string", "minLength": 1},
+        "currency": {"const": "USD"},
+        "effective_date": {"type": "string", "format": "date"},
+        "source": {"type": "string", "minLength": 1},
+        "source_accessed_at": {"type": "string", "format": "date-time"},
+        "source_snapshot_hash": {"$ref": "#/$defs/sha256"},
+        "uncached_input_usd_per_million": {"type": "number", "minimum": 0},
+        "cached_input_usd_per_million": {"type": "number", "minimum": 0},
+        "output_usd_per_million": {"type": "number", "minimum": 0},
+        "request_fee_usd": {"type": "number", "minimum": 0}
+      }
+    }
   }
 }
-

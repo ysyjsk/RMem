@@ -1,20 +1,95 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Plan",
+  "title": "Plan header with PlanNodeRaw child graph",
   "type": "object",
-  "required": ["plan_id", "plan_family", "plan_set_id", "k", "leaf_ids", "ordered_merge_operations", "online_or_offline", "prefix_queryable", "budget_id", "generator_version"],
+  "additionalProperties": false,
+  "required": [
+    "plan_id",
+    "plan_family",
+    "plan_set_id",
+    "k",
+    "leaf_ids",
+    "plan_nodes",
+    "online_or_offline",
+    "prefix_queryable",
+    "budget_id",
+    "generator_version"
+  ],
   "properties": {
     "plan_id": {"type": "string", "minLength": 1},
-    "plan_family": {"type": "string"},
+    "plan_family": {"type": "string", "minLength": 1},
     "plan_set_id": {"enum": ["primary", "diagnostic", "online"]},
     "k": {"enum": [4, 8, 16]},
-    "leaf_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true},
-    "ordered_merge_operations": {"type": "array"},
+    "leaf_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "plan_nodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/PlanNodeRaw"},
+      "minItems": 1
+    },
     "online_or_offline": {"enum": ["online", "offline"]},
     "prefix_queryable": {"type": "boolean"},
     "rebuild_interval": {"type": ["integer", "null"], "minimum": 1},
-    "budget_id": {"type": "string"},
-    "generator_version": {"type": "string"}
+    "budget_id": {"type": "string", "minLength": 1},
+    "generator_version": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "coveredSpan": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "integer", "minimum": 0},
+        {"type": "integer", "minimum": 0}
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "PlanNodeRaw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logical_node_id",
+        "plan_id",
+        "node_type",
+        "leaf_id",
+        "left_logical_child_id",
+        "right_logical_child_id",
+        "covered_span"
+      ],
+      "properties": {
+        "logical_node_id": {"type": "string", "minLength": 1},
+        "plan_id": {"type": "string", "minLength": 1},
+        "node_type": {"enum": ["leaf", "internal"]},
+        "leaf_id": {"type": ["string", "null"], "minLength": 1},
+        "left_logical_child_id": {"type": ["string", "null"], "minLength": 1},
+        "right_logical_child_id": {"type": ["string", "null"], "minLength": 1},
+        "covered_span": {"$ref": "#/$defs/coveredSpan"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"node_type": {"const": "leaf"}}},
+          "then": {
+            "properties": {
+              "leaf_id": {"type": "string", "minLength": 1},
+              "left_logical_child_id": {"const": null},
+              "right_logical_child_id": {"const": null}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"node_type": {"const": "internal"}}},
+          "then": {
+            "properties": {
+              "leaf_id": {"const": null},
+              "left_logical_child_id": {"type": "string", "minLength": 1},
+              "right_logical_child_id": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      ]
+    }
   }
 }
-

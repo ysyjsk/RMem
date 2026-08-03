@@ -1,20 +1,81 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ViewNode",
+  "title": "NodeArtifact (the frozen replacement for ViewNode)",
   "type": "object",
-  "required": ["node_id", "content", "covered_span", "provenance_evidence_ids", "parent_node_ids", "token_count", "capacity", "prompt_hash", "model_snapshot", "seed", "sha256"],
+  "additionalProperties": false,
+  "required": [
+    "materialized_node_id",
+    "logical_node_id",
+    "run_id",
+    "content_artifact_id",
+    "content_hash",
+    "artifact_kind",
+    "memory_tokens_local",
+    "capacity_tokens",
+    "tokenizer_snapshot",
+    "serialization_version",
+    "operator_config_id",
+    "deterministic_operator_hash",
+    "model_snapshot",
+    "prompt_hash",
+    "creation_event_type",
+    "creation_event_id",
+    "schema_version",
+    "validation_status",
+    "materialization_source",
+    "response_hash",
+    "artifact_status"
+  ],
   "properties": {
-    "node_id": {"type": "string", "minLength": 1},
-    "content": {"type": "string"},
-    "covered_span": {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}], "minItems": 2, "maxItems": 2},
-    "provenance_evidence_ids": {"type": "array", "items": {"type": "string"}},
-    "parent_node_ids": {"type": "array", "items": {"type": "string"}},
-    "token_count": {"type": "integer", "minimum": 0},
-    "capacity": {"type": "integer", "minimum": 1},
-    "prompt_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-    "model_snapshot": {"type": "string", "minLength": 1},
-    "seed": {"type": "integer"},
+    "materialized_node_id": {"type": "string", "minLength": 1},
+    "logical_node_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "content_artifact_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!file://)(?![A-Za-z]:[\\\\/]).+"
+    },
+    "content_hash": {"$ref": "#/$defs/sha256"},
+    "artifact_kind": {"type": "string", "minLength": 1},
+    "memory_tokens_local": {"type": "integer", "minimum": 0},
+    "capacity_tokens": {"type": "integer", "minimum": 1},
+    "tokenizer_snapshot": {"type": "string", "minLength": 1},
+    "serialization_version": {"type": "string", "minLength": 1},
+    "operator_config_id": {"type": "string", "minLength": 1},
+    "deterministic_operator_hash": {
+      "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "model_snapshot": {"type": ["string", "null"], "minLength": 1},
+    "prompt_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "creation_event_type": {"type": "string", "minLength": 1},
+    "creation_event_id": {"type": "string", "minLength": 1},
+    "schema_version": {"type": "string", "minLength": 1},
+    "validation_status": {"type": "string", "minLength": 1},
+    "materialization_source": {"enum": ["generated", "cache", "deterministic"]},
+    "response_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "artifact_status": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"materialization_source": {"const": "generated"}}},
+      "then": {
+        "properties": {
+          "model_snapshot": {"type": "string", "minLength": 1},
+          "prompt_hash": {"$ref": "#/$defs/sha256"},
+          "response_hash": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"materialization_source": {"const": "deterministic"}}},
+      "then": {
+        "properties": {
+          "deterministic_operator_hash": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    }
+  ],
+  "$defs": {
     "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
   }
 }
-

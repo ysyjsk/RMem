@@ -7,9 +7,16 @@
 3. Operation item: `eval-protocol-v1.1` schema-only audit category, not an
    `eval-protocol-v1.0` Gate.
 
+The `eval-protocol-v1.0/v1.1` names here refer only to evaluation stages. They
+are not model-framework versions or parallel contracts; the canonical model
+framework file is the unversioned
+`Plan_Robust_Agent_Memory_Model_Framework_Usage.md`.
+
 ## Primary Dataset Contract
 
-Primary v1.0 targets LongMemEval-S knowledge-update and temporal-reasoning, excluding _abs queries. Actual counts must come from file manifests and checksums, not issue threads or papers.
+Primary `eval-protocol-v1.0` targets LongMemEval-S knowledge-update and
+temporal-reasoning, excluding `_abs` queries. Actual counts must come from file
+manifests and checksums, not issue threads or papers.
 
 ## Synthetic Fixture Test Set
 
@@ -69,3 +76,26 @@ online, SATURATION, D_leaf, and matched-capacity branches are recorded in
 `cost_upper_bound.json`. MemoryAgentBench, LoCoMo, second-source qualification,
 judge repeatability, SATURATION-01, and all acceptance experiments remain
 pending. Full leaf generation therefore remains forbidden.
+
+The Judge Repeatability execution contract is frozen before external calls. Its
+50-case manifest is calibration-only, uses 50 unique episodes and seven fixed
+case-category quotas, and expands to exactly 150 unique observations. The
+executable command and raw/derived artifact contract are defined in the sole
+Workplan; this status paragraph does not claim that the real Gate has passed.
+
+Observability is recorded in the existing T0/T6/T7/T9 objects, schemas, metric
+specification, and tests. The required entry order remains:
+
+```text
+Observability Freeze
+-> Evaluator Parity
+-> Judge Repeatability
+-> Cache Qualification
+-> SATURATION-01
+-> Final Judge/Budget Freeze
+-> eval-protocol-v1.0
+-> Q0/D_leaf micro-run
+-> Full Leaves
+```
+
+This file is a dataset status record, not a parallel execution authority.

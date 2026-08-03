@@ -28,9 +28,20 @@ The independent unit is episode/construction unit. Queries are aggregated within
 
 Development supports implementation. Calibration supports budget, judge, seed, and power qualification. Acceptance is sealed until protocol freeze and cannot be used to select data, budget, prompts, thresholds, or baselines.
 
+Gold answers and supporting annotations are protected labels. Construction cannot
+see queries/gold/support labels; answering cannot see gold/support labels; scoring
+may load them only after run artifacts and answers are frozen and access is
+logged.
+
 ## P7 Immutable Source of Truth
 
 Raw evidence, leaves, merged nodes, answers, scores, prompts, configs, checksums, model snapshots, and cache keys must remain auditable.
+
+Observability follows the same rule: raw `PlanNodeRaw`, `NodeArtifact`,
+`ModelCallAttemptRaw`, `AcceptedOutputBindingRaw`, and `MergeEventRaw` are the
+source of truth. Derived plan/merge/resource/support metrics must be rebuildable
+after deleting derived tables. A cache source is represented by its creation
+event; it is not copied into `NodeArtifact` as a second lineage field.
 
 ## P8 Budget-Conditioned Reporting
 
@@ -39,6 +50,12 @@ All results are reported by budget. Primary sweep uses B_merge = B_final = B_que
 ## P9 Auditable Evaluator
 
 Judge model, provider route, requested/returned model, prompt hash, config hash, parser/cache key, and repeatability must be recorded. Silent fallback is prohibited.
+
+Judge Repeatability is calibration-only and requires exactly 50 cases x 3 unique replicates with all frozen case categories. Empty, partial, duplicate, malformed, cross-run, model-drifted, or acceptance-derived inputs fail closed. Passing this Gate establishes output stability under the frozen wrapper; it does not establish human-label validity.
+
+Provider usage and local token counts are recorded separately. Accepted output is
+defined by `AcceptedOutputBindingRaw`; missing provider usage remains unknown,
+and cached input/reasoning subsets are never counted twice.
 
 ## P10 No Single Composite Score
 
@@ -75,4 +92,3 @@ Primary topology comparison fixes backbone and retrieval. Backbone or embedding 
 ## P18 Data Generality Requires Independent Sources
 
 Cross-dataset claims require independent construction processes and true construction-unit counts.
-

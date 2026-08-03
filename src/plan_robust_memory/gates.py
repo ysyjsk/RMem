@@ -6,10 +6,23 @@ from typing import Any
 from .contracts import ContractError
 
 
+FULL_LEAF_QUALIFICATION_SEQUENCE = (
+    "observability_freeze",
+    "evaluator_parity",
+    "judge_repeatability",
+    "cache_qualification",
+    "saturation_01",
+    "final_judge_budget_freeze",
+    "eval_protocol_v1_0",
+    "q0_d_leaf_micro_run",
+)
+
+
 def assert_full_leaf_generation_allowed(
     day1_artifact: Mapping[str, Any],
     data_artifact: Mapping[str, Any],
     power_artifact: Mapping[str, Any],
+    protocol_qualification_artifact: Mapping[str, Any] | None = None,
 ) -> None:
     if day1_artifact.get("status") != "passed":
         raise ContractError("Day 1 Gate has not passed; full leaf generation is forbidden")
@@ -61,3 +74,39 @@ def assert_full_leaf_generation_allowed(
         raise ContractError("power decision must be frozen before topology results")
     if power_artifact.get("hard_no_go_available") is not True:
         raise ContractError("hard NO-GO authority is unavailable; full leaf generation remains blocked")
+    if not isinstance(protocol_qualification_artifact, Mapping):
+        raise ContractError(
+            "protocol qualification is missing; full leaf generation remains blocked"
+        )
+    sequence = protocol_qualification_artifact.get("qualification_sequence")
+    if sequence != list(FULL_LEAF_QUALIFICATION_SEQUENCE):
+        raise ContractError(
+            "protocol qualification violates the frozen full-leaf entry order"
+        )
+    completed = protocol_qualification_artifact.get("completed_stages")
+    if not isinstance(completed, list) or completed != list(
+        FULL_LEAF_QUALIFICATION_SEQUENCE[: len(completed) if isinstance(completed, list) else 0]
+    ):
+        raise ContractError(
+            "protocol qualification completed stages are not an ordered prefix"
+        )
+    if completed != list(FULL_LEAF_QUALIFICATION_SEQUENCE):
+        if "q0_d_leaf_micro_run" not in completed:
+            raise ContractError(
+                "Q0/D_leaf micro-run has not passed; full leaf generation remains blocked"
+            )
+        raise ContractError(
+            "protocol qualification is incomplete; full leaf generation remains blocked"
+        )
+    if protocol_qualification_artifact.get("protocol_tag") != "eval-protocol-v1.0":
+        raise ContractError(
+            "eval-protocol-v1.0 has not been frozen; full leaf generation remains blocked"
+        )
+    if protocol_qualification_artifact.get("status") != "passed":
+        raise ContractError(
+            "protocol qualification has not passed; full leaf generation remains blocked"
+        )
+    if protocol_qualification_artifact.get("full_leaf_generation_allowed") is not True:
+        raise ContractError(
+            "protocol qualification does not authorize full leaf generation"
+        )

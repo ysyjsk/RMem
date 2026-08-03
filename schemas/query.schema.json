@@ -1,8 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Query",
+  "title": "Protected scoring query record",
   "type": "object",
-  "required": ["query_id", "episode_id", "question_type", "is_abstention", "query_text", "gold_answer", "evaluator_id", "supporting_evidence_ids", "split"],
+  "additionalProperties": false,
+  "required": [
+    "query_id",
+    "episode_id",
+    "question_type",
+    "is_abstention",
+    "query_text",
+    "gold_answer",
+    "evaluator_id",
+    "supporting_evidence_ids",
+    "split",
+    "protected_label_access"
+  ],
   "properties": {
     "query_id": {"type": "string", "minLength": 1},
     "episode_id": {"type": "string", "minLength": 1},
@@ -11,8 +23,12 @@
     "query_text": {"type": "string"},
     "gold_answer": {"type": "string"},
     "evaluator_id": {"type": "string", "minLength": 1},
-    "supporting_evidence_ids": {"type": "array", "items": {"type": "string"}},
-    "split": {"enum": ["development", "calibration", "acceptance"]}
+    "supporting_evidence_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "split": {"enum": ["development", "calibration", "acceptance"]},
+    "protected_label_access": {"const": "scoring_only"}
   }
 }
-

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .contracts import ContractError, PI_DIAG, PI_ONLINE, PI_PRIMARY
+from .observability import derive_plan_metrics
 
 
 @dataclass(frozen=True)
@@ -14,15 +15,77 @@ class MergeOp:
 
 
 @dataclass(frozen=True)
+class PlanNodeRaw:
+    logical_node_id: str
+    plan_id: str
+    node_type: str
+    leaf_id: str | None
+    left_logical_child_id: str | None
+    right_logical_child_id: str | None
+    covered_span: tuple[int, int]
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "logical_node_id": self.logical_node_id,
+            "plan_id": self.plan_id,
+            "node_type": self.node_type,
+            "leaf_id": self.leaf_id,
+            "left_logical_child_id": self.left_logical_child_id,
+            "right_logical_child_id": self.right_logical_child_id,
+            "covered_span": list(self.covered_span),
+        }
+
+
+@dataclass(frozen=True)
 class PlanDescriptor:
     plan_id: str
     plan_set_id: str
     k: int
     leaf_ids: tuple[str, ...]
-    ordered_merge_operations: tuple[MergeOp, ...]
+    plan_nodes: tuple[PlanNodeRaw, ...]
     online_or_offline: str = "offline"
     prefix_queryable: bool = False
     rebuild_interval: int | None = None
+
+    @property
+    def ordered_merge_operations(self) -> tuple[MergeOp, ...]:
+        """Derive execution order from the frozen raw child graph."""
+        node_map = {node.logical_node_id: node for node in self.plan_nodes}
+        child_ids = {
+            child_id
+            for node in self.plan_nodes
+            for child_id in (
+                node.left_logical_child_id,
+                node.right_logical_child_id,
+            )
+            if child_id is not None
+        }
+        roots = set(node_map) - child_ids
+        if len(roots) != 1:
+            raise ContractError("plan child graph must have exactly one root")
+        operations: list[MergeOp] = []
+
+        def visit(node_id: str) -> None:
+            node = node_map.get(node_id)
+            if node is None:
+                raise ContractError("plan child graph references an unknown node")
+            if node.node_type == "leaf":
+                return
+            if node.left_logical_child_id is None or node.right_logical_child_id is None:
+                raise ContractError("internal plan node requires two child IDs")
+            visit(node.left_logical_child_id)
+            visit(node.right_logical_child_id)
+            operations.append(
+                MergeOp(
+                    node.left_logical_child_id,
+                    node.right_logical_child_id,
+                    node.logical_node_id,
+                    node.covered_span,
+                )
+            )
+
+        visit(next(iter(roots)))
+        return tuple(operations)
 
 
 @dataclass(frozen=True)
@@ -39,7 +102,9 @@ class OnlineState:
     merge_events: tuple[MergeOp, ...]
     live_forest: tuple[OnlineNode, ...]
     render_order: tuple[str, ...]
-    durable_state_tokens: int | None = None
+    deployment_memory_tokens: int | None = None
+    deployment_metadata_bytes: int | None = None
+    deployment_capability_profile: str | None = None
 
 
 def _leaf_ids(k: int) -> tuple[str, ...]:
@@ -76,6 +141,36 @@ def _balanced_range(start: int, end: int) -> tuple[MergeOp, ...]:
     left = left_ops[-1].output if left_ops else f"leaf_{start}"
     right = right_ops[-1].output if right_ops else f"leaf_{mid + 1}"
     return (*left_ops, *right_ops, MergeOp(left, right, f"node_B_{start}_{end}", (start, end)))
+
+
+def _plan_nodes_from_operations(
+    plan_id: str, k: int, operations: tuple[MergeOp, ...]
+) -> tuple[PlanNodeRaw, ...]:
+    leaves = tuple(
+        PlanNodeRaw(
+            logical_node_id=f"leaf_{index}",
+            plan_id=plan_id,
+            node_type="leaf",
+            leaf_id=f"leaf_{index}",
+            left_logical_child_id=None,
+            right_logical_child_id=None,
+            covered_span=(index, index),
+        )
+        for index in range(k)
+    )
+    internals = tuple(
+        PlanNodeRaw(
+            logical_node_id=operation.output,
+            plan_id=plan_id,
+            node_type="internal",
+            leaf_id=None,
+            left_logical_child_id=operation.left,
+            right_logical_child_id=operation.right,
+            covered_span=operation.span,
+        )
+        for operation in operations
+    )
+    return (*leaves, *internals)
 
 
 def build_online_canonical_states(k: int) -> tuple[OnlineState, ...]:
@@ -146,7 +241,7 @@ def generate_plan(plan_id: str, k: int, plan_set_id: str = "primary") -> PlanDes
         plan_set_id=plan_set_id,
         k=k,
         leaf_ids=_leaf_ids(k),
-        ordered_merge_operations=ops,
+        plan_nodes=_plan_nodes_from_operations(plan_id, k, ops),
         online_or_offline="online" if online else "offline",
         prefix_queryable=online,
     )
@@ -161,45 +256,18 @@ def validate_plan_descriptor(plan: PlanDescriptor) -> None:
         raise ContractError("diagnostic plan descriptor can only contain Pi_diag plans")
     if plan.plan_set_id == "online" and plan.plan_id not in PI_ONLINE:
         raise ContractError("online plan descriptor can only contain Pi_online plans")
-    if len(plan.ordered_merge_operations) != plan.k - 1:
-        raise ContractError("plan must contain k-1 merge operations")
     expected_leaf_ids = _leaf_ids(plan.k)
     if plan.leaf_ids != expected_leaf_ids:
         raise ContractError("plan must list every leaf exactly once in evidence order")
     if plan.online_or_offline == "online" and not plan.prefix_queryable:
         raise ContractError("online plans must be prefix queryable")
-
-    node_spans: dict[str, tuple[int, int]] = {
-        leaf_id: (index, index) for index, leaf_id in enumerate(plan.leaf_ids)
-    }
-    active_nodes = set(plan.leaf_ids)
-
-    for op in plan.ordered_merge_operations:
-        if op.output in node_spans:
-            raise ContractError("merge output must be a fresh node")
-        if op.left == op.right:
-            raise ContractError("merge children must be distinct")
-        if op.left not in active_nodes or op.right not in active_nodes:
-            raise ContractError("merge children must exist and be active exactly once")
-
-        left_span = node_spans[op.left]
-        right_span = node_spans[op.right]
-        if left_span[1] + 1 != right_span[0]:
-            raise ContractError("merge children must be contiguous and order-preserving")
-        expected_span = (left_span[0], right_span[1])
-        if op.span != expected_span:
-            raise ContractError("merge span must equal the union of child spans")
-
-        active_nodes.remove(op.left)
-        active_nodes.remove(op.right)
-        active_nodes.add(op.output)
-        node_spans[op.output] = op.span
-
-    root = plan.ordered_merge_operations[-1].output
-    if active_nodes != {root}:
-        raise ContractError("plan must reduce to one root without reusing nodes")
-    if node_spans[root] != (0, plan.k - 1):
-        raise ContractError("root merge must cover the full span")
+    metrics = derive_plan_metrics(node.as_record() for node in plan.plan_nodes)
+    if any(node.plan_id != plan.plan_id for node in plan.plan_nodes):
+        raise ContractError("PlanNodeRaw plan_id must match its Plan descriptor")
+    if tuple(metrics["descendant_leaf_ids"]) != plan.leaf_ids:
+        raise ContractError("plan child graph must contain every leaf once in evidence order")
+    if metrics["merge_count"] != plan.k - 1:
+        raise ContractError("plan must contain k-1 merge operations")
 
 
 def _assert_live_forest_covers_prefix(state: OnlineState) -> None:

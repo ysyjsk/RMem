@@ -6,6 +6,29 @@ from statistics import fmean
 from typing import Any
 
 from .contracts import ContractError, PI_DIAG, PI_PRIMARY
+from .observability import (
+    build_support_exposure,
+    derive_evidence_exposure,
+    derive_merge_event_metrics,
+    derive_plan_metrics,
+    reconcile_work,
+)
+
+__all__ = [
+    "episode_macro_scores",
+    "q_t",
+    "task_quality",
+    "delta_primary",
+    "diagnostic_range",
+    "validate_primary_statistic_plans",
+    "validate_diagnostic_plans",
+    "sum_lifecycle_cost",
+    "derive_plan_metrics",
+    "derive_evidence_exposure",
+    "derive_merge_event_metrics",
+    "reconcile_work",
+    "build_support_exposure",
+]
 
 
 def episode_macro_scores(rows: Iterable[Mapping[str, Any]]) -> dict[tuple[int, str, int], float]:
@@ -64,4 +87,3 @@ def sum_lifecycle_cost(rows: Iterable[Mapping[str, Any]]) -> dict[str, float | s
             raise ContractError("missing cost must be unknown, not absent or zero")
         total += float(value)
     return {"C_life": total}
-

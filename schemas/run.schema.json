@@ -1,30 +1,230 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Run",
+  "title": "Run configuration, accepted bindings, merge lineage, and executor contract",
   "type": "object",
-  "required": ["run_id", "run_phase", "replicate_id", "episode_id", "k", "budget_id", "plan_id", "plan_set_id", "operator_config_id", "backbone_id", "constructor_model_snapshot", "merge_model_snapshot", "answer_model_snapshot", "s_leaf", "s_merge", "s_answer", "judge_config_hash", "artifact_hashes", "status"],
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "run_phase",
+    "replicate_id",
+    "episode_id",
+    "k",
+    "budget_id",
+    "plan_id",
+    "plan_set_id",
+    "operator_config_id",
+    "backbone_id",
+    "constructor_model_snapshot",
+    "merge_model_snapshot",
+    "answer_model_snapshot",
+    "s_leaf",
+    "s_merge",
+    "s_answer",
+    "judge_config_hash",
+    "artifact_hashes",
+    "cost_artifact_id",
+    "accepted_output_bindings",
+    "merge_events",
+    "executor_config_hash",
+    "executor_mode",
+    "concurrency_limit",
+    "cache_mode",
+    "rate_limit_policy_hash",
+    "retry_policy_hash",
+    "provider_route",
+    "run_started_at",
+    "run_finished_at",
+    "replication_index",
+    "execution_order_index",
+    "run_batch_id",
+    "provider_observation_window",
+    "stage_timing_boundaries",
+    "status"
+  ],
   "properties": {
-    "run_id": {"type": "string"},
-    "run_phase": {"type": "string"},
+    "run_id": {"type": "string", "minLength": 1},
+    "run_phase": {"type": "string", "minLength": 1},
     "replicate_id": {"type": "integer", "minimum": 0},
-    "episode_id": {"type": "string"},
+    "episode_id": {"type": "string", "minLength": 1},
     "k": {"enum": [4, 8, 16]},
-    "budget_id": {"type": "string"},
-    "plan_id": {"type": "string"},
+    "budget_id": {"type": "string", "minLength": 1},
+    "plan_id": {"type": "string", "minLength": 1},
     "plan_set_id": {"enum": ["primary", "diagnostic", "online"]},
-    "operator_config_id": {"type": "string"},
-    "backbone_id": {"type": "string"},
-    "constructor_model_snapshot": {"type": "string"},
-    "merge_model_snapshot": {"type": "string"},
-    "answer_model_snapshot": {"type": "string"},
-    "embedding_model_snapshot": {"type": ["string", "null"]},
+    "operator_config_id": {"type": "string", "minLength": 1},
+    "backbone_id": {"type": "string", "minLength": 1},
+    "constructor_model_snapshot": {"type": "string", "minLength": 1},
+    "merge_model_snapshot": {"type": "string", "minLength": 1},
+    "answer_model_snapshot": {"type": "string", "minLength": 1},
+    "embedding_model_snapshot": {"type": ["string", "null"], "minLength": 1},
     "s_leaf": {"type": "integer"},
     "s_merge": {"type": "integer"},
     "s_answer": {"type": "integer"},
-    "judge_config_hash": {"type": "string"},
-    "retrieval_config_hash": {"type": ["string", "null"]},
+    "judge_config_hash": {"$ref": "#/$defs/sha256"},
+    "retrieval_config_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
     "artifact_hashes": {"type": "object"},
-    "status": {"type": "string"}
+    "cost_artifact_id": {"type": "string", "minLength": 1},
+    "accepted_output_bindings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/AcceptedOutputBindingRaw"}
+    },
+    "merge_events": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/MergeEventRaw"}
+    },
+    "executor_config_hash": {"$ref": "#/$defs/sha256"},
+    "executor_mode": {"type": "string", "minLength": 1},
+    "concurrency_limit": {"type": "integer", "minimum": 1},
+    "cache_mode": {"enum": ["cold", "warm", "resume"]},
+    "rate_limit_policy_hash": {"$ref": "#/$defs/sha256"},
+    "retry_policy_hash": {"$ref": "#/$defs/sha256"},
+    "provider_route": {"type": "string", "minLength": 1},
+    "run_started_at": {"type": "string", "format": "date-time"},
+    "run_finished_at": {"type": "string", "format": "date-time"},
+    "replication_index": {"type": "integer", "minimum": 0},
+    "execution_order_index": {"type": "integer", "minimum": 0},
+    "run_batch_id": {"type": "string", "minLength": 1},
+    "provider_observation_window": {"type": "string", "minLength": 1},
+    "stage_timing_boundaries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["leaf", "merge", "answer", "judge"],
+      "properties": {
+        "leaf": {"$ref": "#/$defs/StageTimingBoundaryRaw"},
+        "merge": {"$ref": "#/$defs/StageTimingBoundaryRaw"},
+        "answer": {"$ref": "#/$defs/StageTimingBoundaryRaw"},
+        "judge": {"$ref": "#/$defs/StageTimingBoundaryRaw"}
+      }
+    },
+    "status": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "AcceptedOutputBindingRaw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "run_id",
+        "stage",
+        "logical_call_id",
+        "accepted_attempt_id",
+        "output_artifact_id",
+        "binding_status"
+      ],
+      "properties": {
+        "binding_id": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "minLength": 1},
+        "stage": {"enum": ["leaf", "merge", "answer", "judge"]},
+        "logical_call_id": {"type": "string", "minLength": 1},
+        "accepted_attempt_id": {"type": ["string", "null"], "minLength": 1},
+        "output_artifact_id": {"type": ["string", "null"], "minLength": 1},
+        "binding_status": {"enum": ["succeeded", "failed", "invalidated"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"binding_status": {"const": "succeeded"}}},
+          "then": {
+            "properties": {
+              "accepted_attempt_id": {"type": "string", "minLength": 1},
+              "output_artifact_id": {"type": "string", "minLength": 1}
+            }
+          },
+          "else": {
+            "properties": {
+              "accepted_attempt_id": {"const": null},
+              "output_artifact_id": {"const": null}
+            }
+          }
+        }
+      ]
+    },
+    "MergeEventRaw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "merge_event_id",
+        "run_id",
+        "logical_operation_id",
+        "accepted_binding_id",
+        "left_materialized_node_id",
+        "right_materialized_node_id",
+        "output_materialized_node_id",
+        "output_budget",
+        "materialization_source",
+        "cache_source_artifact_id",
+        "event_status"
+      ],
+      "properties": {
+        "merge_event_id": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "minLength": 1},
+        "logical_operation_id": {"type": "string", "minLength": 1},
+        "accepted_binding_id": {"type": ["string", "null"], "minLength": 1},
+        "left_materialized_node_id": {"type": "string", "minLength": 1},
+        "right_materialized_node_id": {"type": "string", "minLength": 1},
+        "output_materialized_node_id": {"type": "string", "minLength": 1},
+        "output_budget": {"type": "integer", "minimum": 1},
+        "materialization_source": {"enum": ["generated", "cache", "deterministic"]},
+        "cache_source_artifact_id": {"type": ["string", "null"], "minLength": 1},
+        "event_status": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"materialization_source": {"const": "generated"}}},
+          "then": {
+            "properties": {
+              "accepted_binding_id": {"type": "string", "minLength": 1},
+              "cache_source_artifact_id": {"const": null}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"materialization_source": {"const": "cache"}}},
+          "then": {
+            "properties": {
+              "accepted_binding_id": {"const": null},
+              "cache_source_artifact_id": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"materialization_source": {"const": "deterministic"}}},
+          "then": {"properties": {"accepted_binding_id": {"const": null}}}
+        }
+      ]
+    },
+    "StageTimingBoundaryRaw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "first_logical_operation_scheduled_at",
+        "last_required_artifact_persisted_at"
+      ],
+      "properties": {
+        "status": {"enum": ["recorded", "unavailable"]},
+        "first_logical_operation_scheduled_at": {"type": ["string", "null"], "format": "date-time"},
+        "last_required_artifact_persisted_at": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "recorded"}}},
+          "then": {
+            "properties": {
+              "first_logical_operation_scheduled_at": {"type": "string", "format": "date-time"},
+              "last_required_artifact_persisted_at": {"type": "string", "format": "date-time"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"status": {"const": "unavailable"}}},
+          "then": {
+            "properties": {
+              "first_logical_operation_scheduled_at": {"const": null},
+              "last_required_artifact_persisted_at": {"const": null}
+            }
+          }
+        }
+      ]
+    }
   }
 }
-

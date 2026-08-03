@@ -27,5 +27,21 @@ def test_qualification_report_records_real_embedding_probe_without_opening_gate(
     assert "Day 1 is passed" in text
     assert "No model probe is represented as passed" not in text
     assert "full leaf generation remains forbidden" in text.lower()
-    assert "246 passed" in text
+    assert "375 passed" in text
+
+
+def test_qualification_report_records_evaluator_parity_without_advancing_repeatability() -> None:
+    text = (
+        ROOT / "artifacts" / "reports" / "protocol_qualification_report_v1.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Evaluator Parity is passed" in text
+    assert "evaluator-parity-cdc9dc290e214da2bab361283dd163bd" in text
+    assert "gpt-4o-2024-08-06" in text
+    assert "unavailable external compatibility limitation" in text
+    assert "Judge Repeatability remains pending" in text
+    assert "judge-repeatability-4c37b7794c664566a4d9dbfba4ef27f9" in text
+    assert "HTTP 403" in text
+    assert "zero accepted observations" in text
+    assert "no retry, model fallback, or Cache Qualification" in text
     assert "full leaf generation remains forbidden" in text.lower()

@@ -236,7 +236,7 @@ $$
 
 ### 端点 A：路径不变的集合状态与确定性 render
 
-保留 content-addressed atomic units，durable state 使用 set union；query/render 时依据固定、query-independent 的 total order 或检索规则，在预算内确定性选择内容。
+保留 content-addressed atomic units，deployment state 使用 set union；query/render 时依据固定、query-independent 的 total order 或检索规则，在预算内确定性选择内容。
 
 这类方案可获得精确的 delivery-order / merge-path invariance，但通常：
 
@@ -556,6 +556,28 @@ Primary topology comparison 中硬固定：
 - 对不同 backbone 进行独立 replication；
 - 不将 backbone 或 embedding 变化造成的收益归因于 memory architecture。
 
+## 9.7 Benchmark Observability 的科学边界
+
+除了测量 topology 引起的行为差异，本 benchmark 还在 plan、merge、node 和
+evidence 粒度记录预注册的可观测变量，包括生成式重写深度、内容相对预算
+暴露、合并对象平衡、顺序角色暴露和资源用量。这些变量由原始运行产物事后
+重建，仅作为带 episode-clustered 不确定性区间的描述性 secondary diagnostics，
+不用于筛选 episode、调整 prompt 或 budget、生成 plan、自适应构造策略，亦不
+用于提出确认性机制结论。
+
+In addition to measuring topology-induced behavioral differences, the benchmark
+records preregistered, fine-grained observability variables at plan, merge, node,
+and evidence levels, including generative rewrite depth, content-to-budget
+exposure, merge-partner balance, order-role exposure, and resource usage. These
+variables are reconstructed from raw run artifacts and used only as descriptive
+secondary diagnostics with episode-clustered uncertainty intervals. They are
+never used to select episodes, tune prompts or budgets, generate plans, adapt
+construction policies, or produce confirmatory mechanism claims.
+
+本节只规定科学 framing。具体 raw fields、schema、派生公式、访问边界、执行
+配置和测试以唯一 Workplan、现有 schemas、metric specification 与 tests 为
+execution source of truth，不另行建立并行 observability 文档或对象体系。
+
 ---
 
 # 10. 评价指标与统计协议
@@ -623,7 +645,8 @@ Construction 至少记录：
 - merge/update calls；
 - embedding calls；
 - final memory tokens；
-- durable state size。
+- deployment state size（shared source state 与 experiment artifact footprint
+  分开报告）。
 
 Query 至少记录：
 
@@ -632,6 +655,19 @@ Query 至少记录：
 - answer generation tokens；
 - query calls；
 - 所有 benchmark queries 的累计成本。
+
+Lifecycle cost remains a separate primary result. The benchmark additionally
+records accepted-path and observed operational resource work, provider/local
+token provenance, stage wall-clock, deployment state, shared source state and
+artifact footprint. These observability variables are descriptive and are not
+collapsed into a composite score or used to replace `Task Quality` or `Plan
+Robustness`; exact field names and rebuild formulas are frozen in the Workplan
+and metric specification.
+
+Mechanism diagnostics (rewrite depth, content-to-budget pressure, merge-partner
+balance and order-role exposure) are secondary descriptive variables with
+episode-clustered uncertainty intervals only. They do not create a new primary
+outcome or a confirmatory mechanism test.
 
 最终结果按 budget 绘制 quality–robustness–cost Pareto/frontier，不强行合并为未经验证的单一总分。
 
