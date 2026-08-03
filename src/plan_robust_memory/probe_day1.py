@@ -434,6 +434,79 @@ def _model_probe(
     }
 
 
+def _primary_output_4096_probe(
+    *,
+    request_fn: RequestFn,
+    base_url: str,
+    headers: Mapping[str, str],
+    timeout: float,
+) -> dict[str, Any]:
+    compression_budget_tokens = 4096
+    source = "\n".join(
+        f"Fact {index:04d}: project memory item {index} has owner, date, dependency, and resolution state."
+        for index in range(1, 801)
+    )
+    prompt = (
+        "Compress the source memory below into a queryable experiment memory artifact. "
+        "The compressed memory output must be no more than 4096 model output tokens. "
+        "Do not include markdown fences. Preserve owners, dates, dependencies, conflicts, and unresolved items.\n\n"
+        f"SOURCE MEMORY:\n{source}"
+    )
+    artifact = _model_probe(
+        request_fn=request_fn,
+        base_url=base_url,
+        headers=headers,
+        model=PRIMARY_MODEL,
+        input_text=prompt,
+        max_output_tokens=compression_budget_tokens,
+        repetitions=1,
+        timeout=timeout,
+        role="primary_output_4096",
+    )
+    output_token_values = [
+        int(call.get("usage", {}).get("output_tokens"))
+        for call in artifact.get("calls", [])
+        if isinstance(call.get("usage", {}).get("output_tokens"), int)
+        and not isinstance(call.get("usage", {}).get("output_tokens"), bool)
+    ]
+    provider_exact_output_tokens = len(output_token_values) == int(
+        artifact.get("required_success_count", 0)
+    )
+    observed_output_tokens_max = max(output_token_values) if output_token_values else None
+    observed_lte_budget = bool(
+        provider_exact_output_tokens
+        and observed_output_tokens_max is not None
+        and observed_output_tokens_max <= compression_budget_tokens
+    )
+    artifact.update(
+        {
+            "compression_budget_tokens": compression_budget_tokens,
+            "compression_probe_kind": "direct_memory_compression_dry_run",
+            "wire_max_tokens_equals_compression_budget": artifact.get("requested_max_tokens")
+            == compression_budget_tokens,
+            "provider_exact_output_tokens": provider_exact_output_tokens,
+            "observed_output_tokens_max": observed_output_tokens_max,
+            "output_budget_contract": {
+                "scope": "direct_memory_compression_output_upper_bound",
+                "budget_tokens": compression_budget_tokens,
+                "wire_max_tokens": artifact.get("requested_max_tokens"),
+                "provider_usage_required": True,
+                "observed_output_tokens_lte_budget": observed_lte_budget,
+            },
+        }
+    )
+    if not (
+        artifact.get("status") == "passed"
+        and artifact["wire_max_tokens_equals_compression_budget"] is True
+        and observed_lte_budget
+    ):
+        artifact["status"] = "blocked"
+        artifact["blocking_reason"] = (
+            "primary output compression probe must use max_tokens=4096 and observed provider output tokens must be <=4096"
+        )
+    return artifact
+
+
 def _primary_115k_call(
     *,
     request_fn: RequestFn,
@@ -647,12 +720,18 @@ def _primary_115k_probe(
 
 
 def _judge_probe(*, request_fn: RequestFn, base_url: str, headers: Mapping[str, str], timeout: float) -> dict[str, Any]:
+    judge_contract = (
+        'Return exactly one JSON object and nothing else: {"label": 1} or {"label": 0}. '
+        "Use label 1 only when Candidate fully and exactly satisfies Reference; "
+        "use label 0 for wrong, incomplete, partial, or unsupported candidates. "
+        "No markdown, no prose, no extra keys.\n\n"
+    )
     cases = [
-        ("correct-1", "2+2? Reference: 4. Candidate: 4. Return JSON label 1 or 0.", 1),
-        ("correct-2", "Capital of France? Reference: Paris. Candidate: Paris. Return JSON label 1 or 0.", 1),
-        ("wrong-1", "2+2? Reference: 4. Candidate: 5. Return JSON label 1 or 0.", 0),
-        ("wrong-2", "Capital of France? Reference: Paris. Candidate: Rome. Return JSON label 1 or 0.", 0),
-        ("partial-1", "Reference: red and blue. Candidate: red. Return strict JSON with label.", None),
+        ("correct-1", "Question: 2+2? Reference: 4. Candidate: 4.", 1),
+        ("correct-2", "Question: Capital of France? Reference: Paris. Candidate: Paris.", 1),
+        ("wrong-1", "Question: 2+2? Reference: 4. Candidate: 5.", 0),
+        ("wrong-2", "Question: Capital of France? Reference: Paris. Candidate: Rome.", 0),
+        ("partial-1", "Question: Which colors are required? Reference: red and blue. Candidate: red.", 0),
     ]
     attempts: list[dict[str, Any]] = []
     outputs: list[dict[str, Any]] = []
@@ -663,7 +742,7 @@ def _judge_probe(*, request_fn: RequestFn, base_url: str, headers: Mapping[str, 
             method="POST",
             payload=_chat_payload(
                 model=JUDGE_MODEL,
-                user_content=prompt,
+                user_content=judge_contract + prompt,
                 max_tokens=128,
                 temperature=0,
             ),
@@ -2004,7 +2083,12 @@ def run_day1_probe(
         )
         publish_artifact(
             "primary_output_probe.json",
-            _model_probe(request_fn=request_fn, base_url=base_url, headers=headers, model=PRIMARY_MODEL, input_text="Return the word probe repeatedly within the requested output budget.", max_output_tokens=4096, repetitions=1, timeout=timeout, role="primary_output_4096"),
+            _primary_output_4096_probe(
+                request_fn=request_fn,
+                base_url=base_url,
+                headers=headers,
+                timeout=timeout,
+            ),
         )
         publish_artifact(
             "judge_probe.json",
