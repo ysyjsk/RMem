@@ -67,6 +67,56 @@ def _plan_nodes() -> list[dict]:
     ]
 
 
+def _asymmetric_plan_nodes() -> list[dict]:
+    return [
+        {
+            "logical_node_id": "leaf-0",
+            "plan_id": "p1",
+            "node_type": "leaf",
+            "leaf_id": "l0",
+            "left_logical_child_id": None,
+            "right_logical_child_id": None,
+            "covered_span": [0, 0],
+        },
+        {
+            "logical_node_id": "leaf-1",
+            "plan_id": "p1",
+            "node_type": "leaf",
+            "leaf_id": "l1",
+            "left_logical_child_id": None,
+            "right_logical_child_id": None,
+            "covered_span": [1, 1],
+        },
+        {
+            "logical_node_id": "leaf-2",
+            "plan_id": "p1",
+            "node_type": "leaf",
+            "leaf_id": "l2",
+            "left_logical_child_id": None,
+            "right_logical_child_id": None,
+            "covered_span": [2, 2],
+        },
+        {
+            "logical_node_id": "left-branch",
+            "plan_id": "p1",
+            "node_type": "internal",
+            "leaf_id": None,
+            "left_logical_child_id": "leaf-0",
+            "right_logical_child_id": "leaf-1",
+            "covered_span": [0, 1],
+        },
+        {
+            "logical_node_id": "root",
+            "plan_id": "p1",
+            "node_type": "internal",
+            "leaf_id": None,
+            "left_logical_child_id": "left-branch",
+            "right_logical_child_id": "leaf-2",
+            "covered_span": [0, 2],
+        },
+    ]
+
+
 def _attempt(*, attempt_id: str = "a1", stage: str = "merge", outcome: str = "accepted_materialized") -> dict:
     return {
         "attempt_id": attempt_id,
@@ -82,8 +132,8 @@ def _attempt(*, attempt_id: str = "a1", stage: str = "merge", outcome: str = "ac
         "request_id": f"req-{attempt_id}",
         "prompt_hash": "a" * 64,
         "response_hash": "b" * 64,
-        "local_serialized_input_tokens": 20,
-        "local_output_content_tokens": 8,
+        "local_surrogate_serialized_input_tokens": 20,
+        "local_surrogate_output_content_tokens": 8,
         "tokenizer_snapshot": "tok@1",
         "serialization_version": "chat-v1",
         "provider_input_tokens_total": 20,
@@ -112,7 +162,7 @@ def _artifact(*, source: str = "generated", event_type: str = "merge", event_id:
         "content_artifact_id": "artifact://sha256/bbbb",
         "content_hash": "b" * 64,
         "artifact_kind": "memory_node",
-        "memory_tokens_local": 8,
+        "local_surrogate_content_tokens": 8,
         "capacity_tokens": 16,
         "tokenizer_snapshot": "tok@1",
         "serialization_version": "chat-v1",
@@ -166,7 +216,8 @@ def test_plan_metrics_rebuild_from_child_edges() -> None:
     assert metrics["tree_height"] == 1
     assert metrics["critical_path_merge_count"] == 1
     assert metrics["merge_count"] == 1
-    assert metrics["order_role_path_vector"]["l0"] == ["earlier"]
+    assert metrics["order_role_path_vector_root_to_leaf"]["l0"] == ["earlier"]
+    assert "order_role_path_vector" not in metrics
 
 
 def test_plan_node_raw_rejects_negative_evidence_indexes() -> None:
@@ -192,7 +243,8 @@ def test_evidence_exposure_rebuilds_path_and_cache_does_not_change_semantic_dept
     assert generated["l0"] == {
         "leaf_depth": 1,
         "generative_rewrite_depth": 1,
-        "order_role_sequence": ["earlier"],
+        "generative_merge_path_leaf_to_root": ["root"],
+        "order_role_sequence_root_to_leaf": ["earlier"],
         "earlier_span_fraction": 1.0,
         "later_span_fraction": 0.0,
         "relative_position": 0.0,
@@ -200,6 +252,22 @@ def test_evidence_exposure_rebuilds_path_and_cache_does_not_change_semantic_dept
         "pressure_max": 1.5,
     }
     assert generated["l1"]["relative_position"] == 1.0
+
+
+def test_evidence_exposure_freezes_path_directions_on_an_asymmetric_tree() -> None:
+    exposure = derive_evidence_exposure(
+        _asymmetric_plan_nodes(),
+        merge_metrics_by_logical_node={
+            "left-branch": {"content_to_budget_pressure": 1.25},
+            "root": {"content_to_budget_pressure": 1.5},
+        },
+        generative_logical_node_ids={"left-branch", "root"},
+    )
+
+    assert exposure["l0"]["order_role_sequence_root_to_leaf"] == ["earlier", "earlier"]
+    assert exposure["l0"]["generative_merge_path_leaf_to_root"] == ["left-branch", "root"]
+    assert exposure["l0"]["generative_rewrite_depth"] == 2
+    assert "order_role_sequence" not in exposure["l0"]
 
 
 def test_node_artifact_content_reference_and_source_invariants() -> None:
@@ -388,7 +456,7 @@ def test_provider_usage_and_local_tokens_are_not_conflated() -> None:
     validate_model_call_attempt(attempt)
     totals = aggregate_attempt_work([attempt], accepted_attempt_ids=set())
     assert totals["observed_input_tokens_total"] == "unknown"
-    assert totals["local_input_tokens_total"] == 20
+    assert totals["local_surrogate_input_tokens_total"] == 20
 
 
 def test_cached_input_is_subset_and_not_double_counted() -> None:
@@ -404,6 +472,74 @@ def test_model_call_attempt_http_status_matches_schema_range() -> None:
     bad["http_status"] = 600
     with pytest.raises(ContractError, match="HTTP"):
         validate_model_call_attempt(bad)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "failed_provider",
+        "failed_validation",
+        "cancelled_before_start",
+        "cancelled_after_start",
+    ],
+)
+def test_failed_or_cancelled_attempt_may_have_unknown_provider_identity(
+    outcome: str,
+) -> None:
+    attempt = _attempt(outcome=outcome)
+    attempt["returned_model"] = None
+    attempt["request_id"] = None
+    attempt["response_hash"] = None
+    if outcome == "cancelled_before_start":
+        attempt["started_at"] = None
+        attempt["finished_at"] = None
+    attempt["provider_usage_source"] = "missing"
+    for field in (
+        "provider_input_tokens_total",
+        "provider_cached_input_tokens_subset",
+        "provider_output_tokens_total",
+        "provider_reasoning_tokens_subset",
+    ):
+        attempt[field] = None
+    validate_model_call_attempt(attempt)
+
+
+@pytest.mark.parametrize("field", ["returned_model", "request_id"])
+@pytest.mark.parametrize(
+    "outcome",
+    ["accepted_materialized", "successful_nonmaterialized", "failed_parse"],
+)
+def test_provider_response_attempt_requires_identity_fields(field: str, outcome: str) -> None:
+    attempt = _attempt(outcome=outcome)
+    attempt[field] = None
+    with pytest.raises(ContractError):
+        validate_model_call_attempt(attempt)
+
+
+@pytest.mark.parametrize("field", ["returned_model", "request_id"])
+@pytest.mark.parametrize("placeholder", ["", "   ", "unknown", "None", " UNKNOWN "])
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "accepted_materialized",
+        "successful_nonmaterialized",
+        "failed_parse",
+        "failed_validation",
+        "failed_provider",
+        "cancelled_before_start",
+        "cancelled_after_start",
+    ],
+)
+def test_provider_identity_never_accepts_a_placeholder(
+    field: str, outcome: str, placeholder: str
+) -> None:
+    attempt = _attempt(outcome=outcome)
+    attempt[field] = placeholder
+    if outcome == "cancelled_before_start":
+        attempt["started_at"] = None
+        attempt["finished_at"] = None
+    with pytest.raises(ContractError):
+        validate_model_call_attempt(attempt)
 
 
 def test_missing_provider_usage_requires_null_provider_fields() -> None:
@@ -614,6 +750,23 @@ def test_provider_scope_is_fixed_and_shared_leaf_work_is_deduplicated() -> None:
     totals = deduplicate_shared_leaf_work([row, dict(row)])
     assert totals["unique_shared_leaf_count"] == 1
     assert totals["shared_leaf_input_tokens_total"] == 20
+
+
+def test_provider_scope_uses_requested_model_when_failed_attempt_has_no_returned_model() -> None:
+    accepted = _attempt()
+    failed = _attempt(attempt_id="a2", outcome="failed_provider")
+    failed["returned_model"] = None
+    failed["request_id"] = None
+    failed["response_hash"] = None
+    failed["provider_usage_source"] = "missing"
+    for field in (
+        "provider_input_tokens_total",
+        "provider_cached_input_tokens_subset",
+        "provider_output_tokens_total",
+        "provider_reasoning_tokens_subset",
+    ):
+        failed[field] = None
+    validate_provider_usage_scope([accepted, failed])
 
 
 @pytest.mark.parametrize(

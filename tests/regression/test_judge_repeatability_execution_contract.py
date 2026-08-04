@@ -43,7 +43,10 @@ def test_workplan_freezes_raw_derived_artifacts_and_run_identity() -> None:
         "judge_repeatability_stall.json",
     ):
         assert artifact in workplan
-    assert "AcceptedOutputBindingRaw` 是 accepted judge output 的唯一真值" in workplan
+    assert (
+        "AcceptedOutputBindingRaw` 是 accepted generated judge API output 的唯一"
+        in workplan
+    )
     assert "只能依据 `judge_repeatability_run_state.json` 中本次 `run_id`" in workplan
 
 

@@ -4,6 +4,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import urllib.error
 
 import pytest
 
@@ -702,14 +703,23 @@ def test_runner_uses_one_user_message_direct_then_proxy_and_advances_only_one_st
     assert run_state["state"] == "completed"
     assert run_state["run_id"] == artifact["run_id"]
     assert run_state["artifacts"]["judge_repeatability.json"]["run_id"] == artifact["run_id"]
-    attempts = _jsonl(tmp_path / "judge_repeatability_attempts.jsonl")
+    attempts = _jsonl(
+        Path(run_state["run_directory"]) / "judge_repeatability_attempts.jsonl"
+    )
     bindings = _jsonl(tmp_path / "judge_repeatability_output_bindings.jsonl")
     outputs = _jsonl(tmp_path / "judge_repeatability_outputs.jsonl")
     transport = _jsonl(tmp_path / "judge_repeatability_transport_attempts.jsonl")
-    assert len(attempts) == len(bindings) == len(outputs) == 150
+    assert len(attempts) == 151
+    assert len(bindings) == len(outputs) == 150
     assert len(transport) == 151
     validate_accepted_output_bindings(attempts, bindings)
     assert all(row["stage"] == "judge" for row in attempts)
+    assert attempts[0]["attempt_outcome"] == "failed_provider"
+    assert attempts[0]["accepted_attempt"] is False
+    assert attempts[0]["returned_model"] is None
+    assert attempts[0]["request_id"] is None
+    assert attempts[0]["provider_usage_source"] == "missing"
+    assert attempts[0]["http_status"] is None
     assert all(row["binding_status"] == "succeeded" for row in bindings)
     assert all(row["run_id"] == artifact["run_id"] for row in outputs)
     assert transport[0]["status"] == "failed"
@@ -794,6 +804,17 @@ def test_runner_uses_exactly_two_routes_then_stalls_on_access_failure(
             now_fn=lambda: "2026-08-03T16:00:00Z",
         )
     assert routes == ["direct", "proxy_17897"]
+    run_state = json.loads(
+        (tmp_path / "judge_repeatability_run_state.json").read_text(encoding="utf-8")
+    )
+    attempts = _jsonl(
+        Path(run_state["run_directory"]) / "judge_repeatability_attempts.jsonl"
+    )
+    assert len(attempts) == 2
+    assert all(row["attempt_outcome"] == "failed_provider" for row in attempts)
+    assert all(row["returned_model"] is None for row in attempts)
+    assert all(row["request_id"] is None for row in attempts)
+    assert all(row["accepted_attempt"] is False for row in attempts)
     stall = json.loads(
         (tmp_path / "judge_repeatability_stall.json").read_text(encoding="utf-8")
     )
@@ -834,6 +855,128 @@ def test_runner_treats_http_error_status_as_route_failure_before_proxy(
     transport = _jsonl(tmp_path / "judge_repeatability_transport_attempts.jsonl")
     assert transport[0]["status"] == "failed"
     assert transport[1]["status"] == "completed"
+    attempts = _jsonl(tmp_path / "judge_repeatability_attempts.jsonl")
+    assert attempts[0]["attempt_outcome"] == "failed_provider"
+    assert attempts[0]["http_status"] == 503
+    assert attempts[0]["returned_model"] == "gpt-5.5"
+    assert attempts[0]["request_id"] == "request-1"
+
+
+def test_runner_preserves_http_error_status_and_provider_request_id(
+    tmp_path: Path,
+) -> None:
+    def request(url: str, payload: dict, headers: dict, route: str, timeout: float):
+        del payload, headers, timeout
+        raise urllib.error.HTTPError(
+            url,
+            403,
+            "Forbidden",
+            {"x-request-id": f"request-{route}"},
+            None,
+        )
+
+    with pytest.raises(ContractError, match="direct and proxy_17897"):
+        run_judge_repeatability(
+            output_dir=tmp_path,
+            case_manifest=_manifest(),
+            evaluator_parity=_parity(),
+            protocol_state=_protocol_state(),
+            model_inventory=_inventory(),
+            judge_probe=_judge_probe(),
+            **_upstream_kwargs(),
+            api_key="secret",
+            request_fn=request,
+            now_fn=lambda: "2026-08-03T16:00:00Z",
+        )
+
+    run_state = json.loads(
+        (tmp_path / "judge_repeatability_run_state.json").read_text(encoding="utf-8")
+    )
+    run_dir = Path(run_state["run_directory"])
+    attempts = _jsonl(run_dir / "judge_repeatability_attempts.jsonl")
+    transport = _jsonl(run_dir / "judge_repeatability_transport_attempts.jsonl")
+    assert [row["http_status"] for row in attempts] == [403, 403]
+    assert [row["request_id"] for row in attempts] == [
+        "request-direct",
+        "request-proxy_17897",
+    ]
+    assert [row["returned_model"] for row in attempts] == [None, None]
+    assert [row["attempt_id"] for row in attempts] == [
+        row["transport_attempt_id"] for row in transport
+    ]
+
+
+@pytest.mark.parametrize("invalid_model", [None, 123, "None", "unknown"])
+def test_runner_records_invalid_returned_model_as_null_without_placeholder(
+    tmp_path: Path, invalid_model: object,
+) -> None:
+    def request(url: str, payload: dict, headers: dict, route: str, timeout: float):
+        del url, payload, headers, route, timeout
+        response, metadata = _response(1, 1)
+        response["model"] = invalid_model
+        return response, metadata
+
+    with pytest.raises(ContractError, match="returned model"):
+        run_judge_repeatability(
+            output_dir=tmp_path,
+            case_manifest=_manifest(),
+            evaluator_parity=_parity(),
+            protocol_state=_protocol_state(),
+            model_inventory=_inventory(),
+            judge_probe=_judge_probe(),
+            **_upstream_kwargs(),
+            api_key="secret",
+            request_fn=request,
+            now_fn=lambda: "2026-08-03T16:00:00Z",
+        )
+
+    run_state = json.loads(
+        (tmp_path / "judge_repeatability_run_state.json").read_text(encoding="utf-8")
+    )
+    attempts = _jsonl(
+        Path(run_state["run_directory"]) / "judge_repeatability_attempts.jsonl"
+    )
+    assert len(attempts) == 1
+    assert attempts[0]["attempt_outcome"] == "failed_validation"
+    assert attempts[0]["returned_model"] is None
+    assert attempts[0]["request_id"] == "request-1"
+
+
+@pytest.mark.parametrize("invalid_request_id", [None, "None", "unknown"])
+def test_runner_records_missing_request_id_as_failed_validation(
+    tmp_path: Path, invalid_request_id: object,
+) -> None:
+    def request(url: str, payload: dict, headers: dict, route: str, timeout: float):
+        del url, payload, headers, route, timeout
+        response, metadata = _response(1, 1)
+        response["id"] = invalid_request_id
+        metadata["request_id"] = invalid_request_id
+        return response, metadata
+
+    with pytest.raises(ContractError, match="request_id"):
+        run_judge_repeatability(
+            output_dir=tmp_path,
+            case_manifest=_manifest(),
+            evaluator_parity=_parity(),
+            protocol_state=_protocol_state(),
+            model_inventory=_inventory(),
+            judge_probe=_judge_probe(),
+            **_upstream_kwargs(),
+            api_key="secret",
+            request_fn=request,
+            now_fn=lambda: "2026-08-03T16:00:00Z",
+        )
+
+    run_state = json.loads(
+        (tmp_path / "judge_repeatability_run_state.json").read_text(encoding="utf-8")
+    )
+    attempts = _jsonl(
+        Path(run_state["run_directory"]) / "judge_repeatability_attempts.jsonl"
+    )
+    assert len(attempts) == 1
+    assert attempts[0]["attempt_outcome"] == "failed_validation"
+    assert attempts[0]["returned_model"] == "gpt-5.5"
+    assert attempts[0]["request_id"] is None
 
 
 def test_runner_fails_closed_on_model_drift_and_keeps_previous_prefix(

@@ -72,6 +72,7 @@ _DAY1_ARTIFACT_NAMES = {
     "embedding_probe.json",
     "cost_upper_bound.json",
 }
+_PROVIDER_IDENTITY_PLACEHOLDERS = {"none", "unknown"}
 _CASE_FIELDS = {
     "case_id",
     "episode_id",
@@ -176,6 +177,14 @@ def _require_mapping(value: Any, name: str) -> Mapping[str, Any]:
 def _require_string(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise JudgeRepeatabilityError(f"{name} must be a non-empty string")
+    return value
+
+
+def _observed_provider_identity(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    if value.strip().casefold() in _PROVIDER_IDENTITY_PLACEHOLDERS:
+        return None
     return value
 
 
@@ -1176,7 +1185,7 @@ def _attempt_record(
     response: Mapping[str, Any],
     response_text: str,
     response_hash: str,
-    request_id: str,
+    request_id: str | None,
     http_status: int,
     finish_reason: str | None,
     timestamp: str,
@@ -1185,6 +1194,7 @@ def _attempt_record(
     failure_type: str | None,
 ) -> dict[str, Any]:
     source, input_total, cached, output_total, reasoning = _provider_usage(response)
+    returned_model = _observed_provider_identity(response.get("model"))
     record = {
         "attempt_id": attempt_id,
         "run_id": run_id,
@@ -1193,14 +1203,14 @@ def _attempt_record(
         "accepted_attempt": outcome == "accepted_materialized",
         "retry_index": retry_index,
         "requested_model": PROJECT_JUDGE_MODEL,
-        "returned_model": str(response.get("model")),
+        "returned_model": returned_model,
         "provider": "labforge",
         "provider_route": route,
         "request_id": request_id,
         "prompt_hash": _sha256_bytes(prompt.encode("utf-8")),
         "response_hash": response_hash,
-        "local_serialized_input_tokens": _local_token_count(prompt),
-        "local_output_content_tokens": _local_token_count(response_text),
+        "local_surrogate_serialized_input_tokens": _local_token_count(prompt),
+        "local_surrogate_output_content_tokens": _local_token_count(response_text),
         "tokenizer_snapshot": LOCAL_TOKENIZER_SNAPSHOT,
         "serialization_version": SERIALIZATION_VERSION,
         "provider_input_tokens_total": input_total,
@@ -1221,6 +1231,79 @@ def _attempt_record(
     }
     validate_model_call_attempt_raw(record)
     return record
+
+
+def _failed_attempt_record(
+    *,
+    run_id: str,
+    logical_call_id: str,
+    attempt_id: str,
+    retry_index: int,
+    route: str,
+    prompt: str,
+    response: Mapping[str, Any] | None,
+    response_metadata: Mapping[str, Any] | None,
+    http_status: int | None,
+    scheduled_at: str,
+    finished_at: str,
+    failure_type: str,
+) -> dict[str, Any]:
+    response_object: Mapping[str, Any] = response if isinstance(response, Mapping) else {}
+    metadata: Mapping[str, Any] = (
+        response_metadata if isinstance(response_metadata, Mapping) else {}
+    )
+    source, input_total, cached, output_total, reasoning = _provider_usage(response_object)
+    returned_model = _observed_provider_identity(response_object.get("model"))
+    request_id = _observed_provider_identity(metadata.get("request_id"))
+    if request_id is None:
+        request_id = _observed_provider_identity(response_object.get("id"))
+    response_hash = metadata.get("response_hash")
+    if not isinstance(response_hash, str) or not response_hash.strip():
+        response_hash = None
+    record = {
+        "attempt_id": attempt_id,
+        "run_id": run_id,
+        "stage": "judge",
+        "logical_call_id": logical_call_id,
+        "accepted_attempt": False,
+        "retry_index": retry_index,
+        "requested_model": PROJECT_JUDGE_MODEL,
+        "returned_model": returned_model,
+        "provider": "labforge",
+        "provider_route": route,
+        "request_id": request_id,
+        "prompt_hash": _sha256_bytes(prompt.encode("utf-8")),
+        "response_hash": response_hash,
+        "local_surrogate_serialized_input_tokens": _local_token_count(prompt),
+        "local_surrogate_output_content_tokens": 0,
+        "tokenizer_snapshot": LOCAL_TOKENIZER_SNAPSHOT,
+        "serialization_version": SERIALIZATION_VERSION,
+        "provider_input_tokens_total": input_total,
+        "provider_cached_input_tokens_subset": cached,
+        "provider_output_tokens_total": output_total,
+        "provider_reasoning_tokens_subset": reasoning,
+        "usage_schema_version": "openai-chat-completions-usage-v1",
+        "provider_usage_source": source,
+        "scheduled_at": scheduled_at,
+        "started_at": scheduled_at,
+        "finished_at": finished_at,
+        "http_status": http_status,
+        "finish_reason": None,
+        "parse_status": "not_attempted",
+        "failure_type": failure_type,
+        "attempt_outcome": "failed_provider",
+        "status": "failed",
+    }
+    validate_model_call_attempt_raw(record)
+    return record
+
+
+def _error_request_id(exc: BaseException) -> str | None:
+    headers = getattr(exc, "headers", None)
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    value = headers.get("x-request-id") or headers.get("X-Request-ID")
+    return _observed_provider_identity(value)
 
 
 def _artifact_entry(path: Path, run_id: str, state: str = "completed") -> dict[str, Any]:
@@ -1369,6 +1452,7 @@ def run_judge_repeatability(
                 accepted_retry_index = 0
                 for retry_index, route in enumerate(("direct", "proxy_17897")):
                     attempt_started = now_fn()
+                    status: Any = None
                     transport_id = "transport-" + stable_hash(
                         {
                             "run_id": run_id,
@@ -1428,8 +1512,39 @@ def run_judge_repeatability(
                         urllib.error.URLError,
                         urllib.error.HTTPError,
                     ) as exc:
-                        response = None
-                        response_metadata = None
+                        attempt_finished = now_fn()
+                        failure_metadata = dict(response_metadata or {})
+                        header_request_id = _error_request_id(exc)
+                        if (
+                            _observed_provider_identity(
+                                failure_metadata.get("request_id")
+                            )
+                            is None
+                            and header_request_id is not None
+                        ):
+                            failure_metadata["request_id"] = header_request_id
+                        failure_http_status = (
+                            status
+                            if isinstance(status, int)
+                            and not isinstance(status, bool)
+                            and 100 <= status <= 599
+                            else getattr(exc, "code", None)
+                        )
+                        if (
+                            isinstance(failure_http_status, bool)
+                            or not isinstance(failure_http_status, int)
+                            or not 100 <= failure_http_status <= 599
+                        ):
+                            failure_http_status = None
+                        failure_request_id = _observed_provider_identity(
+                            failure_metadata.get("request_id")
+                        )
+                        failure_response_hash = failure_metadata.get("response_hash")
+                        if (
+                            not isinstance(failure_response_hash, str)
+                            or not failure_response_hash.strip()
+                        ):
+                            failure_response_hash = None
                         transport_attempts.append(
                             {
                                 "transport_attempt_id": transport_id,
@@ -1440,30 +1555,51 @@ def run_judge_repeatability(
                                 "retry_index": retry_index,
                                 "route": route,
                                 "scheduled_at": attempt_started,
-                                "finished_at": now_fn(),
+                                "finished_at": attempt_finished,
                                 "status": "failed",
-                                "http_status": getattr(exc, "code", None),
-                                "request_id": None,
-                                "response_hash": None,
+                                "http_status": failure_http_status,
+                                "request_id": failure_request_id,
+                                "response_hash": failure_response_hash,
                                 "error_type": type(exc).__name__,
                                 "error": _redact(exc, api_key),
                             }
                         )
+                        attempts.append(
+                            _failed_attempt_record(
+                                run_id=run_id,
+                                logical_call_id=logical_call_id,
+                                attempt_id=transport_id,
+                                retry_index=retry_index,
+                                route=route,
+                                prompt=prompt,
+                                response=response,
+                                response_metadata=failure_metadata,
+                                http_status=failure_http_status,
+                                scheduled_at=attempt_started,
+                                finished_at=attempt_finished,
+                                failure_type=type(exc).__name__,
+                            )
+                        )
+                        response = None
+                        response_metadata = None
                         persist_raw()
                 if response is None or response_metadata is None:
                     raise JudgeRepeatabilityError(
                         "judge access failed through direct and proxy_17897"
                     )
 
-                returned_model = response.get("model")
+                returned_model = _observed_provider_identity(response.get("model"))
                 response_text, finish_reason = _response_content(response)
                 response_hash = response_metadata.get("response_hash")
                 if not isinstance(response_hash, str) or not response_hash:
                     response_hash = _sha256_bytes(
                         canonical_json(dict(response)).encode("utf-8")
                     )
-                request_id = response_metadata.get("request_id") or response.get("id")
-                request_id = _require_string(request_id, "provider request_id")
+                request_id = _observed_provider_identity(
+                    response_metadata.get("request_id")
+                )
+                if request_id is None:
+                    request_id = _observed_provider_identity(response.get("id"))
                 http_status = response_metadata.get("http_status", 200)
                 if (
                     isinstance(http_status, bool)
@@ -1502,7 +1638,12 @@ def run_judge_repeatability(
                 }
                 outputs.append(raw_output)
 
-                if returned_model != PROJECT_JUDGE_MODEL:
+                if returned_model != PROJECT_JUDGE_MODEL or request_id is None:
+                    failure_type = (
+                        "returned_model_drift"
+                        if returned_model != PROJECT_JUDGE_MODEL
+                        else "missing_request_id"
+                    )
                     attempts.append(
                         _attempt_record(
                             run_id=run_id,
@@ -1520,12 +1661,16 @@ def run_judge_repeatability(
                             timestamp=now_fn(),
                             outcome="failed_validation",
                             parse_status="not_attempted",
-                            failure_type="returned_model_drift",
+                            failure_type=failure_type,
                         )
                     )
                     persist_raw()
+                    if returned_model != PROJECT_JUDGE_MODEL:
+                        raise JudgeRepeatabilityError(
+                            f"judge returned model {returned_model!r}, expected frozen gpt-5.5"
+                        )
                     raise JudgeRepeatabilityError(
-                        f"judge returned model {returned_model!r}, expected frozen gpt-5.5"
+                        "provider response is missing request_id"
                     )
                 try:
                     label = parse_project_judge_json_label(response_text)

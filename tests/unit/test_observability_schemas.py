@@ -49,7 +49,7 @@ def _artifact() -> dict:
         "content_artifact_id": "content/sha256/b",
         "content_hash": "b" * 64,
         "artifact_kind": "memory_node",
-        "memory_tokens_local": 20,
+        "local_surrogate_content_tokens": 20,
         "capacity_tokens": 32,
         "tokenizer_snapshot": "tok@1",
         "serialization_version": "serialization-v1",
@@ -82,8 +82,8 @@ def _attempt() -> dict:
         "request_id": "request1",
         "prompt_hash": "a" * 64,
         "response_hash": "b" * 64,
-        "local_serialized_input_tokens": 20,
-        "local_output_content_tokens": 8,
+        "local_surrogate_serialized_input_tokens": 20,
+        "local_surrogate_output_content_tokens": 8,
         "tokenizer_snapshot": "tok@1",
         "serialization_version": "serialization-v1",
         "provider_input_tokens_total": 20,
@@ -200,7 +200,86 @@ def test_cost_schema_keeps_missing_provider_usage_null_and_local_only() -> None:
     ):
         attempt[field] = None
     validate(cost, _schema("cost.schema.json"))
-    attempt["provider_input_tokens_total"] = attempt["local_serialized_input_tokens"]
+    attempt["provider_input_tokens_total"] = attempt["local_surrogate_serialized_input_tokens"]
+    with pytest.raises(ValidationError):
+        validate(cost, _schema("cost.schema.json"))
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "failed_provider",
+        "failed_validation",
+        "cancelled_before_start",
+        "cancelled_after_start",
+    ],
+)
+def test_cost_schema_allows_null_provider_identity_when_no_response_identity_exists(
+    outcome: str,
+) -> None:
+    cost = _cost()
+    attempt = cost["model_call_attempts"][0]
+    attempt["accepted_attempt"] = False
+    attempt["attempt_outcome"] = outcome
+    attempt["returned_model"] = None
+    attempt["request_id"] = None
+    attempt["response_hash"] = None
+    if outcome == "cancelled_before_start":
+        attempt["started_at"] = None
+        attempt["finished_at"] = None
+    attempt["provider_usage_source"] = "missing"
+    for field in (
+        "provider_input_tokens_total",
+        "provider_cached_input_tokens_subset",
+        "provider_output_tokens_total",
+        "provider_reasoning_tokens_subset",
+    ):
+        attempt[field] = None
+    validate(cost, _schema("cost.schema.json"))
+
+
+@pytest.mark.parametrize("field", ["returned_model", "request_id"])
+@pytest.mark.parametrize(
+    "outcome",
+    ["accepted_materialized", "successful_nonmaterialized", "failed_parse"],
+)
+def test_cost_schema_requires_provider_identity_for_provider_responses(
+    field: str, outcome: str
+) -> None:
+    cost = _cost()
+    attempt = cost["model_call_attempts"][0]
+    attempt["accepted_attempt"] = outcome == "accepted_materialized"
+    attempt["attempt_outcome"] = outcome
+    attempt[field] = None
+    with pytest.raises(ValidationError):
+        validate(cost, _schema("cost.schema.json"))
+
+
+@pytest.mark.parametrize("field", ["returned_model", "request_id"])
+@pytest.mark.parametrize("placeholder", ["", "   ", "unknown", "None", " UNKNOWN "])
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "accepted_materialized",
+        "successful_nonmaterialized",
+        "failed_parse",
+        "failed_validation",
+        "failed_provider",
+        "cancelled_before_start",
+        "cancelled_after_start",
+    ],
+)
+def test_cost_schema_never_accepts_a_provider_identity_placeholder(
+    field: str, outcome: str, placeholder: str
+) -> None:
+    cost = _cost()
+    attempt = cost["model_call_attempts"][0]
+    attempt["accepted_attempt"] = outcome == "accepted_materialized"
+    attempt["attempt_outcome"] = outcome
+    attempt[field] = placeholder
+    if outcome == "cancelled_before_start":
+        attempt["started_at"] = None
+        attempt["finished_at"] = None
     with pytest.raises(ValidationError):
         validate(cost, _schema("cost.schema.json"))
 

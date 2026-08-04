@@ -40,7 +40,7 @@ _NODE_ARTIFACT_FIELDS = {
     "content_artifact_id",
     "content_hash",
     "artifact_kind",
-    "memory_tokens_local",
+    "local_surrogate_content_tokens",
     "capacity_tokens",
     "tokenizer_snapshot",
     "serialization_version",
@@ -70,8 +70,8 @@ _ATTEMPT_FIELDS = {
     "request_id",
     "prompt_hash",
     "response_hash",
-    "local_serialized_input_tokens",
-    "local_output_content_tokens",
+    "local_surrogate_serialized_input_tokens",
+    "local_surrogate_output_content_tokens",
     "tokenizer_snapshot",
     "serialization_version",
     "provider_input_tokens_total",
@@ -115,6 +115,7 @@ _MERGE_EVENT_FIELDS = {
 _STAGES = {"leaf", "merge", "answer", "judge"}
 _MATERIALIZATION_SOURCES = {"generated", "cache", "deterministic"}
 _PROVIDER_USAGE_SOURCES = {"provider_exact", "provider_estimated", "missing"}
+_PROVIDER_IDENTITY_PLACEHOLDERS = {"none", "unknown"}
 _ATTEMPT_OUTCOMES = {
     "accepted_materialized",
     "successful_nonmaterialized",
@@ -136,7 +137,7 @@ _DEPLOYMENT_PROFILES = {
 _CACHE_CONTENT_LINEAGE_FIELDS = (
     "content_artifact_id",
     "content_hash",
-    "memory_tokens_local",
+    "local_surrogate_content_tokens",
     "tokenizer_snapshot",
     "serialization_version",
 )
@@ -176,6 +177,19 @@ def _require_string(record: Mapping[str, Any], field: str, *, nullable: bool = F
         return
     if not isinstance(value, str) or not value.strip():
         raise ObservabilityContractError(f"{field} must be a non-empty string")
+
+
+def _require_provider_identity(
+    record: Mapping[str, Any], field: str, *, nullable: bool
+) -> None:
+    value = record.get(field)
+    if nullable and value is None:
+        return
+    _require_string(record, field)
+    if str(value).strip().casefold() in _PROVIDER_IDENTITY_PLACEHOLDERS:
+        raise ObservabilityContractError(
+            f"{field} must be an observed provider identity, not a placeholder"
+        )
 
 
 def _require_nonnegative_int(value: Any, field: str, *, nullable: bool = False) -> None:
@@ -335,14 +349,14 @@ def derive_plan_metrics(
         raise ObservabilityContractError("PlanNodeRaw child graph reuses a leaf")
 
     leaf_depth_vector: dict[str, int] = {}
-    order_role_path_vector: dict[str, list[str]] = {}
+    order_role_path_vector_root_to_leaf: dict[str, list[str]] = {}
 
     def walk(node_id: str, depth: int, path: tuple[str, ...]) -> None:
         node = node_map[node_id]
         if node["node_type"] == "leaf":
             leaf_id = str(node["leaf_id"])
             leaf_depth_vector[leaf_id] = depth
-            order_role_path_vector[leaf_id] = list(path)
+            order_role_path_vector_root_to_leaf[leaf_id] = list(path)
             return
         walk(str(node["left_logical_child_id"]), depth + 1, (*path, "earlier"))
         walk(str(node["right_logical_child_id"]), depth + 1, (*path, "later"))
@@ -352,7 +366,7 @@ def derive_plan_metrics(
     return {
         "descendant_leaf_ids": list(root_leaves),
         "leaf_depth_vector": leaf_depth_vector,
-        "order_role_path_vector": order_role_path_vector,
+        "order_role_path_vector_root_to_leaf": order_role_path_vector_root_to_leaf,
         "tree_height": tree_height,
         "critical_path_merge_count": tree_height,
         "merge_count": sum(node["node_type"] == "internal" for node in node_map.values()),
@@ -407,11 +421,11 @@ def derive_evidence_exposure(
             roles_leaf_to_root.append(role)
             node_id = parent_id
         roles = list(reversed(roles_leaf_to_root))
-        generative_path = [
+        generative_merge_path_leaf_to_root = [
             parent_id for parent_id in parent_path if parent_id in generative_logical_node_ids
         ]
         pressures: list[float] = []
-        for parent_id in generative_path:
+        for parent_id in generative_merge_path_leaf_to_root:
             metric = merge_metrics_by_logical_node.get(parent_id)
             if not isinstance(metric, Mapping):
                 raise ObservabilityContractError(
@@ -426,8 +440,9 @@ def derive_evidence_exposure(
         depth = len(roles)
         result[leaf_id] = {
             "leaf_depth": depth,
-            "generative_rewrite_depth": len(generative_path),
-            "order_role_sequence": roles,
+            "generative_rewrite_depth": len(generative_merge_path_leaf_to_root),
+            "generative_merge_path_leaf_to_root": generative_merge_path_leaf_to_root,
+            "order_role_sequence_root_to_leaf": roles,
             "earlier_span_fraction": roles.count("earlier") / depth if depth else 0.0,
             "later_span_fraction": roles.count("later") / depth if depth else 0.0,
             "relative_position": position / denominator if len(leaf_order) > 1 else 0.0,
@@ -489,10 +504,13 @@ def _validate_node_artifact_intrinsic(
         raise ObservabilityContractError(
             "content_artifact_id must be a stable artifact reference, not an absolute local path"
         )
-    _require_nonnegative_int(artifact.get("memory_tokens_local"), "memory_tokens_local")
+    _require_nonnegative_int(
+        artifact.get("local_surrogate_content_tokens"),
+        "local_surrogate_content_tokens",
+    )
     _require_positive_int(artifact.get("capacity_tokens"), "capacity_tokens")
-    if artifact["memory_tokens_local"] > artifact["capacity_tokens"]:
-        raise ObservabilityContractError("memory_tokens_local exceeds capacity_tokens")
+    if artifact["local_surrogate_content_tokens"] > artifact["capacity_tokens"]:
+        raise ObservabilityContractError("local_surrogate_content_tokens exceeds capacity_tokens")
     content_id = str(artifact["content_artifact_id"])
     if _resolve_content_artifact(content_artifacts, content_id) is None:
         raise ObservabilityContractError("NodeArtifact content reference is not resolvable")
@@ -659,10 +677,8 @@ def validate_model_call_attempt_raw(attempt: Mapping[str, Any]) -> Mapping[str, 
         "run_id",
         "logical_call_id",
         "requested_model",
-        "returned_model",
         "provider",
         "provider_route",
-        "request_id",
         "prompt_hash",
         "tokenizer_snapshot",
         "serialization_version",
@@ -675,14 +691,26 @@ def validate_model_call_attempt_raw(attempt: Mapping[str, Any]) -> Mapping[str, 
         _require_string(attempt, "response_hash")
     if attempt.get("stage") not in _STAGES:
         raise ObservabilityContractError("stage must be leaf, merge, answer, or judge")
+    outcome = attempt.get("attempt_outcome")
+    if outcome not in _ATTEMPT_OUTCOMES:
+        raise ObservabilityContractError("attempt_outcome is not recognized")
+    identity_required = outcome in {
+        "accepted_materialized",
+        "successful_nonmaterialized",
+        "failed_parse",
+    }
+    for field in ("returned_model", "request_id"):
+        _require_provider_identity(attempt, field, nullable=not identity_required)
     if not isinstance(attempt.get("accepted_attempt"), bool):
         raise ObservabilityContractError("accepted_attempt must be a boolean derived cache")
     _require_nonnegative_int(attempt.get("retry_index"), "retry_index")
     _require_nonnegative_int(
-        attempt.get("local_serialized_input_tokens"), "local_serialized_input_tokens"
+        attempt.get("local_surrogate_serialized_input_tokens"),
+        "local_surrogate_serialized_input_tokens",
     )
     _require_nonnegative_int(
-        attempt.get("local_output_content_tokens"), "local_output_content_tokens"
+        attempt.get("local_surrogate_output_content_tokens"),
+        "local_surrogate_output_content_tokens",
     )
 
     source = attempt.get("provider_usage_source")
@@ -722,9 +750,6 @@ def validate_model_call_attempt_raw(attempt: Mapping[str, Any]) -> Mapping[str, 
                 "provider_reasoning_tokens_subset must be a subset of provider_output_tokens_total"
             )
 
-    outcome = attempt.get("attempt_outcome")
-    if outcome not in _ATTEMPT_OUTCOMES:
-        raise ObservabilityContractError("attempt_outcome is not recognized")
     if attempt["accepted_attempt"] != (outcome == "accepted_materialized"):
         raise ObservabilityContractError(
             "accepted_attempt cache must agree with accepted_materialized outcome"
@@ -966,13 +991,13 @@ def derive_merge_event_metrics(
         output = artifacts[str(event["output_materialized_node_id"])]
     except KeyError as exc:
         raise ObservabilityContractError("MergeEventMetrics requires all three NodeArtifacts") from exc
-    left_tokens = left.get("memory_tokens_local")
-    right_tokens = right.get("memory_tokens_local")
-    output_tokens = output.get("memory_tokens_local")
+    left_tokens = left.get("local_surrogate_content_tokens")
+    right_tokens = right.get("local_surrogate_content_tokens")
+    output_tokens = output.get("local_surrogate_content_tokens")
     for value, field in (
-        (left_tokens, "left memory_tokens_local"),
-        (right_tokens, "right memory_tokens_local"),
-        (output_tokens, "output memory_tokens_local"),
+        (left_tokens, "left local_surrogate_content_tokens"),
+        (right_tokens, "right local_surrogate_content_tokens"),
+        (output_tokens, "output local_surrogate_content_tokens"),
     ):
         _require_nonnegative_int(value, field)
     total_children = int(left_tokens) + int(right_tokens)
@@ -1001,7 +1026,7 @@ def derive_merge_event_metrics(
     payload_ratio: float | str = "unavailable"
     if attempt is not None:
         validate_model_call_attempt_raw(attempt)
-        payload_ratio = attempt["local_serialized_input_tokens"] / budget
+        payload_ratio = attempt["local_surrogate_serialized_input_tokens"] / budget
     return {
         "logical_operation_id": event.get("logical_operation_id"),
         "materialization_source": event.get("materialization_source"),
@@ -1012,7 +1037,7 @@ def derive_merge_event_metrics(
         "token_imbalance_abs": abs(int(left_tokens) - int(right_tokens)) / total_children,
         "token_imbalance_signed": signed,
         "time_span_imbalance": "unavailable",
-        "generative_rewrite_depth": 1 if event.get("materialization_source") == "generated" else 0,
+        "is_generative_merge": event.get("materialization_source") == "generated",
     }
 
 
@@ -1123,11 +1148,11 @@ def aggregate_attempt_work(
         "observed_cached_input_tokens_subset": observed["cached"],
         "observed_uncached_input_tokens": observed["uncached"],
         "observed_output_tokens": observed["output"],
-        "local_input_tokens_total": sum(
-            int(record["local_serialized_input_tokens"]) for record in records
+        "local_surrogate_input_tokens_total": sum(
+            int(record["local_surrogate_serialized_input_tokens"]) for record in records
         ),
-        "local_output_tokens_total": sum(
-            int(record["local_output_content_tokens"]) for record in records
+        "local_surrogate_output_tokens_total": sum(
+            int(record["local_surrogate_output_content_tokens"]) for record in records
         ),
         "api_attempt_count": len(records),
         "failed_api_attempt_count": sum(
@@ -1609,7 +1634,7 @@ def validate_provider_usage_scope(attempts: Iterable[Mapping[str, Any]]) -> None
     scopes = {
         (
             record["provider"],
-            record["returned_model"],
+            record["returned_model"] or record["requested_model"],
             record["provider_route"],
             record["usage_schema_version"],
         )

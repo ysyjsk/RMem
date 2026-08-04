@@ -43,6 +43,17 @@ source of truth. Derived plan/merge/resource/support metrics must be rebuildable
 after deleting derived tables. A cache source is represented by its creation
 event; it is not copied into `NodeArtifact` as a second lineage field.
 
+`AcceptedOutputBindingRaw` is specifically the unique truth for an accepted
+generated API output. Cache and deterministic materializations establish
+acceptance through their creation/materialization event and source artifact and
+must not fabricate a binding or API attempt. Path contracts fail closed unless
+they use `order_role_path_vector_root_to_leaf`,
+`order_role_sequence_root_to_leaf`, and
+`generative_merge_path_leaf_to_root` in the stated directions. A merge-event
+row exposes `is_generative_merge`; only EvidenceExposure may expose
+`generative_rewrite_depth`, equal to the length of its leaf-to-root generative
+path.
+
 ## P8 Budget-Conditioned Reporting
 
 All results are reported by budget. Primary sweep uses B_merge = B_final = B_query = B.
@@ -53,9 +64,24 @@ Judge model, provider route, requested/returned model, prompt hash, config hash,
 
 Judge Repeatability is calibration-only and requires exactly 50 cases x 3 unique replicates with all frozen case categories. Empty, partial, duplicate, malformed, cross-run, model-drifted, or acceptance-derived inputs fail closed. Passing this Gate establishes output stability under the frozen wrapper; it does not establish human-label validity.
 
-Provider usage and local token counts are recorded separately. Accepted output is
-defined by `AcceptedOutputBindingRaw`; missing provider usage remains unknown,
-and cached input/reasoning subsets are never counted twice.
+For every `ModelCallAttemptRaw`, `requested_model`, `provider`, and
+`provider_route` are non-empty. `returned_model` and `request_id` keys are
+present but may be null only for `failed_validation`, `failed_provider`, and
+cancelled outcomes; accepted, successful-nonmaterialized, and parse-failed
+provider responses require non-empty values. Placeholder identity strings are
+invalid.
+
+Provider usage and local surrogate token counts are recorded separately.
+Accepted generated API output is defined by `AcceptedOutputBindingRaw`; missing
+provider usage remains unknown, and cached input/reasoning subsets are never
+counted twice. `local_surrogate_content_tokens`,
+`local_surrogate_serialized_input_tokens`, and
+`local_surrogate_output_content_tokens` are reproducible proxies under
+`surrogate_regex_bytes_v1`, not exact model tokens. Before Q0, the existing
+G-COST/Q0 entry condition requires either a frozen real tokenizer or measured
+provider/tokenizer error, a justified safety margin, and evidence that admitted
+inputs/outputs cannot exceed the real model budget. No such qualification is
+presumed complete.
 
 ## P10 No Single Composite Score
 
@@ -92,3 +118,13 @@ Primary topology comparison fixes backbone and retrieval. Backbone or embedding 
 ## P18 Data Generality Requires Independent Sources
 
 Cross-dataset claims require independent construction processes and true construction-unit counts.
+
+## P19 Test-First Contract Evolution
+
+Observability contract changes begin with failing validator/schema-parity and
+raw-to-derived tests. The red tests must cover nullable failed-attempt provider
+identity without placeholder strings, generated/cache/deterministic binding
+boundaries, canonical path direction, event-versus-evidence rewrite semantics,
+and surrogate-versus-provider token separation. Implementation and documentation
+may be frozen only after those tests pass without retaining legacy parallel
+fields.

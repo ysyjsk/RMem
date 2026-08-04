@@ -75,6 +75,17 @@
   ],
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "providerIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\s*(?:[Uu][Nn][Kk][Nn][Oo][Ww][Nn]|[Nn][Oo][Nn][Ee])\\s*$)(?=.*\\S).+$"
+    },
+    "nullableProviderIdentity": {
+      "oneOf": [
+        {"$ref": "#/$defs/providerIdentity"},
+        {"type": "null"}
+      ]
+    },
     "tokenValue": {
       "oneOf": [{"type": "integer", "minimum": 0}, {"const": "unknown"}]
     },
@@ -209,8 +220,8 @@
         "request_id",
         "prompt_hash",
         "response_hash",
-        "local_serialized_input_tokens",
-        "local_output_content_tokens",
+        "local_surrogate_serialized_input_tokens",
+        "local_surrogate_output_content_tokens",
         "tokenizer_snapshot",
         "serialization_version",
         "provider_input_tokens_total",
@@ -237,14 +248,14 @@
         "accepted_attempt": {"type": "boolean", "readOnly": true},
         "retry_index": {"type": "integer", "minimum": 0},
         "requested_model": {"type": "string", "minLength": 1},
-        "returned_model": {"type": "string", "minLength": 1},
+        "returned_model": {"$ref": "#/$defs/nullableProviderIdentity"},
         "provider": {"type": "string", "minLength": 1},
         "provider_route": {"type": "string", "minLength": 1},
-        "request_id": {"type": "string", "minLength": 1},
+        "request_id": {"$ref": "#/$defs/nullableProviderIdentity"},
         "prompt_hash": {"$ref": "#/$defs/sha256"},
         "response_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
-        "local_serialized_input_tokens": {"type": "integer", "minimum": 0},
-        "local_output_content_tokens": {"type": "integer", "minimum": 0},
+        "local_surrogate_serialized_input_tokens": {"type": "integer", "minimum": 0},
+        "local_surrogate_output_content_tokens": {"type": "integer", "minimum": 0},
         "tokenizer_snapshot": {"type": "string", "minLength": 1},
         "serialization_version": {"type": "string", "minLength": 1},
         "provider_input_tokens_total": {"type": ["integer", "null"], "minimum": 0},
@@ -292,6 +303,26 @@
               "provider_input_tokens_total": {"type": "integer", "minimum": 0},
               "provider_cached_input_tokens_subset": {"type": "integer", "minimum": 0},
               "provider_output_tokens_total": {"type": "integer", "minimum": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "attempt_outcome": {
+                "enum": [
+                  "accepted_materialized",
+                  "successful_nonmaterialized",
+                  "failed_parse"
+                ]
+              }
+            },
+            "required": ["attempt_outcome"]
+          },
+          "then": {
+            "properties": {
+              "returned_model": {"$ref": "#/$defs/providerIdentity"},
+              "request_id": {"$ref": "#/$defs/providerIdentity"}
             }
           }
         }

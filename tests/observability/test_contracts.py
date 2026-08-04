@@ -66,8 +66,8 @@ def _attempt(
         "request_id": f"request-{attempt_id}",
         "prompt_hash": "a" * 64,
         "response_hash": "b" * 64 if outcome != "failed_provider" else None,
-        "local_serialized_input_tokens": 90,
-        "local_output_content_tokens": 30,
+        "local_surrogate_serialized_input_tokens": 90,
+        "local_surrogate_output_content_tokens": 30,
         "tokenizer_snapshot": "tokenizer@rev1",
         "serialization_version": "serialization-v1",
         "provider_input_tokens_total": input_tokens,
@@ -108,7 +108,7 @@ def _node_artifact(source: str = "generated") -> dict:
         "content_artifact_id": "content-r",
         "content_hash": "c" * 64,
         "artifact_kind": "merge",
-        "memory_tokens_local": 70,
+        "local_surrogate_content_tokens": 70,
         "capacity_tokens": 100,
         "tokenizer_snapshot": "tokenizer@rev1",
         "serialization_version": "serialization-v1",
@@ -137,10 +137,11 @@ def test_plan_metrics_rebuild_from_child_edges_and_preserve_order_roles() -> Non
 
     assert metrics["descendant_leaf_ids"] == ["leaf-1", "leaf-2"]
     assert metrics["leaf_depth_vector"] == {"leaf-1": 1, "leaf-2": 1}
-    assert metrics["order_role_path_vector"] == {
+    assert metrics["order_role_path_vector_root_to_leaf"] == {
         "leaf-1": ["earlier"],
         "leaf-2": ["later"],
     }
+    assert "order_role_path_vector" not in metrics
     assert metrics["tree_height"] == 1
     assert metrics["critical_path_merge_count"] == 1
     assert metrics["merge_count"] == 1
@@ -260,14 +261,21 @@ def test_provider_usage_is_not_conflated_and_work_reconciles() -> None:
         outcome="failed_provider",
         logical_call_id="call-3",
     )
+    failed["returned_model"] = None
+    failed["request_id"] = None
+    failed["provider_usage_source"] = "missing"
+    failed["provider_input_tokens_total"] = None
+    failed["provider_cached_input_tokens_subset"] = None
+    failed["provider_output_tokens_total"] = None
+    failed["provider_reasoning_tokens_subset"] = None
     binding = _binding("accepted")
     work = reconcile_work([accepted, nonmaterialized, failed], [binding])
 
     assert work["accepted_path"]["accepted_merge_input_tokens_total"] == 100
     assert work["accepted_path"]["accepted_merge_cached_input_tokens_subset"] == 20
     assert work["accepted_path"]["accepted_merge_uncached_input_tokens"] == 80
-    assert work["observed_operational"]["observed_merge_input_tokens_total"] == 300
-    assert work["observed_operational"]["observed_merge_uncached_input_tokens"] == 240
+    assert work["observed_operational"]["observed_merge_input_tokens_total"] == "unknown"
+    assert work["observed_operational"]["observed_merge_uncached_input_tokens"] == "unknown"
     assert work["observed_operational"]["accepted_materialized_generation_count"] == 1
     assert work["observed_operational"]["successful_nonmaterialized_attempt_count"] == 1
     assert work["observed_operational"]["failed_api_attempt_count"] == 1
@@ -333,9 +341,21 @@ def test_support_labels_are_unavailable_until_scoring_boundary() -> None:
 
 
 def test_merge_event_metrics_separate_content_pressure_and_payload_ratio() -> None:
-    left = {"materialized_node_id": "left", "memory_tokens_local": 30, "covered_span": [0, 1]}
-    right = {"materialized_node_id": "right", "memory_tokens_local": 10, "covered_span": [2, 3]}
-    output = {"materialized_node_id": "out", "memory_tokens_local": 20, "covered_span": [0, 3]}
+    left = {
+        "materialized_node_id": "left",
+        "local_surrogate_content_tokens": 30,
+        "covered_span": [0, 1],
+    }
+    right = {
+        "materialized_node_id": "right",
+        "local_surrogate_content_tokens": 10,
+        "covered_span": [2, 3],
+    }
+    output = {
+        "materialized_node_id": "out",
+        "local_surrogate_content_tokens": 20,
+        "covered_span": [0, 3],
+    }
     attempt = _attempt(input_tokens=80, cached_tokens=10, output_tokens=20)
     metrics = derive_merge_event_metrics(
         {
@@ -354,4 +374,26 @@ def test_merge_event_metrics_separate_content_pressure_and_payload_ratio() -> No
     assert metrics["token_imbalance_abs"] == 0.5
     assert metrics["token_imbalance_signed"] == 0.5
     assert metrics["payload_to_budget_ratio"] == 2.25
-    assert metrics["generative_rewrite_depth"] == 1
+    assert metrics["is_generative_merge"] is True
+    assert "generative_rewrite_depth" not in metrics
+
+
+@pytest.mark.parametrize("materialization_source", ["cache", "deterministic"])
+def test_non_generated_merge_event_is_not_generative(materialization_source: str) -> None:
+    metrics = derive_merge_event_metrics(
+        {
+            "output_budget": 40,
+            "materialization_source": materialization_source,
+            "left_materialized_node_id": "left",
+            "right_materialized_node_id": "right",
+            "output_materialized_node_id": "out",
+        },
+        artifacts={
+            "left": {"materialized_node_id": "left", "local_surrogate_content_tokens": 30},
+            "right": {"materialized_node_id": "right", "local_surrogate_content_tokens": 10},
+            "out": {"materialized_node_id": "out", "local_surrogate_content_tokens": 20},
+        },
+    )
+
+    assert metrics["is_generative_merge"] is False
+    assert "generative_rewrite_depth" not in metrics

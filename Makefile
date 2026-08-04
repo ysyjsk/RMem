@@ -15,6 +15,8 @@ test-first:
 	  tests/unit/test_observability_contract.py \
 	  tests/unit/test_observability_schemas.py \
 	  tests/observability/test_contracts.py \
+	  tests/regression/test_surrogate_token_semantics.py \
+	  tests/regression/test_judge_repeatability_execution_contract.py \
 	  tests/integration/test_no_leaves_before_gates.py \
 	  tests/qualification/test_original_evaluator_parity.py \
 	  tests/qualification/test_evaluator_parity_gate.py \

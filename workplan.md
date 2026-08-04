@@ -642,7 +642,7 @@ derived cache，并用递归 child-edge rebuild 测试证明一致。
 NodeArtifact
 ├── materialized_node_id / logical_node_id / run_id
 ├── content_artifact_id / content_hash / artifact_kind
-├── memory_tokens_local / capacity_tokens
+├── local_surrogate_content_tokens / capacity_tokens
 ├── tokenizer_snapshot / serialization_version / operator_config_id
 ├── deterministic_operator_hash
 ├── model_snapshot / prompt_hash / response_hash
@@ -652,22 +652,53 @@ NodeArtifact
 └── artifact_status
 ```
 
-`NodeArtifact` 不新增 `cache_source_artifact_id`。Generated、cache 和
-deterministic 的 lineage 分别由 accepted binding、creation event 和
-`deterministic_operator_hash` 验证。
+`NodeArtifact` 不新增 `cache_source_artifact_id`。Generated API output 的
+lineage 由 accepted binding 验证；cache 和 deterministic materialization 通过
+creation/materialization event 与 source artifact 建立接受关系，其中
+deterministic 还必须验证 `deterministic_operator_hash`。
 
 ### ModelCallAttemptRaw
 
-所有 leaf、merge、answer、judge API 调用共用一套 raw attempt 记录。必须
-同时保存 local token 与 provider usage；`provider_usage_source` 只能是
-`provider_exact`、`provider_estimated` 或 `missing`。Missing 时 provider
-token 字段全部为 null，不得用 local count 冒充 provider usage。
+所有 leaf、merge、answer、judge API 调用共用一套 raw attempt 记录。
+`requested_model`、`provider` 和 `provider_route` 在每个 attempt 中均必须是
+非空字符串。`returned_model` 和 `request_id` 的 key 也必须存在，但
+值只在 provider 实际返回对应 identity 时记录：
+
+- `accepted_materialized`、`successful_nonmaterialized` 和 `failed_parse`
+  必须为非空字符串；
+- `failed_validation`、`failed_provider`、`cancelled_before_start` 和
+  `cancelled_after_start` 允许为 null，非 null 时仍必须是非空字符串；
+- 不得使用 `"unknown"`、`"None"` 或其他伪造占位字符串代替
+  provider 未提供的 identity。
+
+每个 attempt 同时保存
+`local_surrogate_serialized_input_tokens`、
+`local_surrogate_output_content_tokens` 与 provider usage；
+`provider_usage_source` 只能是 `provider_exact`、`provider_estimated` 或
+`missing`。Missing 时 provider token 字段全部为 null，不得用
+local surrogate count 冒充 provider usage。
+
+`local_surrogate_content_tokens`、
+`local_surrogate_serialized_input_tokens` 和
+`local_surrogate_output_content_tokens` 当前均由
+`surrogate_regex_bytes_v1` 产生，只能用于 deterministic partition、相对
+长度比较和可复现的 pressure proxy，不得称为 exact model tokens。
+所有以这些字段为输入的 pressure、compression、utilization 和
+balance 指标都必须标记为 local-surrogate proxy。在 Q0 前，必须在
+既有 G-COST 内部资格条件中二选一：冻结真实模型 tokenizer 及 immutable
+revision；或提供 provider/tokenizer 误差界、有依据的 safety margin 与不
+超过真实模型预算的测试证据。当前不得声称该资格已通过，也不
+因此新增顶层 Gate。
 
 ### AcceptedOutputBindingRaw
 
-Leaf、merge、answer、judge 的 accepted output 均通过同一 binding 对象绑定。
-成功 binding 与 accepted attempt 是一对一关系；`accepted_attempt` 若保留
-只能是该引用关系的派生缓存，不能成为第二个真相源。
+`AcceptedOutputBindingRaw` 是 leaf、merge、answer、judge 阶段
+accepted generated API output 的唯一事实源。成功 binding 与
+accepted attempt 是一对一关系；`accepted_attempt` 若保留只能是该
+引用关系的派生缓存，不能成为第二个真相源。Cache 和
+deterministic materialization 不是 generated API output，通过
+creation/materialization event 与 source artifact 建立接受关系，不得伪造
+accepted API binding。
 
 ### MergeEventRaw
 
@@ -1656,18 +1687,26 @@ T6 的 `PlanMetrics` 必须由 `PlanNodeRaw` child edges 递归重建，不调�
 ```text
 descendant_leaf_ids
 leaf_depth_vector
-order_role_path_vector
+order_role_path_vector_root_to_leaf
 tree_height
 critical_path_merge_count
 merge_count
 deterministic_plan_hash
 ```
 
-`earlier_span_fraction`、`later_span_fraction` 和 order-role sequence 只由
-frozen evidence order 与 covered spans 决定；`time_span_imbalance` 与
+`order_role_path_vector_root_to_leaf` 中每条 role path 从 root 走向 leaf。
+EvidenceExposure 的 `order_role_sequence_root_to_leaf` 使用相同方向；
+`generative_merge_path_leaf_to_root` 则显式按 evidence leaf 到 root 的语义
+merge 顺序保存 logical merge node IDs，不得使用无方向后缀的旧
+path/sequence 字段建立并行真值。`earlier_span_fraction`、
+`later_span_fraction` 和 order-role sequence 只由 frozen evidence order 与
+covered spans 决定；`time_span_imbalance` 与
 `boundary_real_time_gap` 只有 event/valid time 质量足够时才报告，否则为
-`unavailable`。`generative_rewrite_depth` 只数 semantic path 上的
-generative merge operator，不受 cache hit、retry 或 failed attempt 影响。
+`unavailable`。MergeEventMetrics 的 per-event 字段仅为布尔值
+`is_generative_merge`；`generative_rewrite_depth` 只保留在
+EvidenceExposure，且等于
+`len(generative_merge_path_leaf_to_root)`，不受 cache hit、retry 或
+failed attempt 影响。
 
 T6 必须同时能从 creation event、accepted binding 和 merge event 重建
 materialized lineage；任何失败 attempt 都不能进入 lineage。
@@ -2068,8 +2107,10 @@ usage schema。没有 PricingManifest 时 estimated USD 为 `unavailable`，但
 
 Phase 1 必选机制指标仅保留四类：
 
-1. structural exposure：leaf depth、generative rewrite depth、order-role
-   sequence、earlier/later span fraction、relative position；
+1. structural exposure：leaf depth、EvidenceExposure 层的
+   `generative_rewrite_depth`、`order_role_sequence_root_to_leaf`、
+   `generative_merge_path_leaf_to_root`、earlier/later span fraction 和
+   relative position；
 2. compression exposure：`content_to_budget_pressure`、`pressure_sum`、
    `pressure_max`、`actual_compression_ratio`、`output_budget_utilization` 和
    `payload_to_budget_ratio`；
@@ -2083,10 +2124,13 @@ episode-plan-run 先聚合，再报告 episode-clustered bootstrap interval；�
 行不能膨胀样本量，不同 topology 的第 n 个 merge 不直接配对，不产生
 confirmatory p-value，也不进入任何 primary GO/NO-GO。
 
-机制字段的 canonical names 为 `order_role_sequence`、
+机制字段的 canonical names 为
+`order_role_path_vector_root_to_leaf`、`order_role_sequence_root_to_leaf`、
+`generative_merge_path_leaf_to_root`、`is_generative_merge`、
 `earlier_span_fraction`、`later_span_fraction` 和
-`critical_path_merge_count`。`content_to_budget_pressure` 是结构代理，不
-证明 semantic retention。
+`critical_path_merge_count`。旧的无方向 path/sequence 名称与 per-event
+`generative_rewrite_depth` 不得保留为并行字段。
+`content_to_budget_pressure` 是结构代理，不证明 semantic retention。
 
 ## 12.17 T7 support exposure 与访问边界
 
@@ -2277,9 +2321,11 @@ judge_repeatability_run_state.json              current run identity/state/check
 judge_repeatability_stall.json                  current blocked-run evidence
 ```
 
-`AcceptedOutputBindingRaw` 是 accepted judge output 的唯一真值。provider
-usage 与本地 surrogate token count 分离；缺少 provider cache subset 时保持
-provider usage unknown，不以零或本地计数代替。Judge work 仍是 evaluation
+`AcceptedOutputBindingRaw` 是 accepted generated judge API output 的唯一
+真值。Provider usage 与
+`local_surrogate_serialized_input_tokens`/
+`local_surrogate_output_content_tokens` 分离；缺少 provider cache subset 时保持
+provider usage unknown，不以零或本地 surrogate 计数代替。Judge work 仍是 evaluation
 overhead，不进入 memory lifecycle cost。运行中和运行结束后只能依据 `judge_repeatability_run_state.json` 中本次 `run_id` 及其 artifact checksum
 判断状态；不得读取旧同名 aggregate 宣称本次通过或失败。run-scoped raw
 文件在完成后才原子发布为 canonical artifacts。
@@ -2365,13 +2411,19 @@ token accounting、hash、split、partition、plan serialization、metric aggreg
 16. PlanNodeRaw 含派生字段或 child span 无法重建；
 17. NodeArtifact 使用绝对路径或新增 cache source 字段；
 18. generated/cache/deterministic lineage 与 accepted binding 不一致；
-19. provider/local token、cached subset 或 reasoning subset 被混淆；
+19. provider/local-surrogate token、cached subset 或 reasoning subset 被混淆；
 20. accepted-path/observed work、judge overhead 和 shared leaf work 对账失败；
 21. support labels 泄漏到 construction/answer 或重复加权 supporting leaf；
 22. formal executor/cache/retry/rate-limit/route 不一致或 stage wall-clock 边界
     不可重建；
 23. full-leaf guard 在 Observability Freeze、SATURATION-01、protocol tag 或
     Q0/D_leaf 之前错误放行。
+24. failed/cancelled attempt 使用伪造 `returned_model`/`request_id`
+    占位符，或 accepted/successful/parse-failed attempt 的该字段为 null；
+25. path/sequence 没有方向后缀、走向与后缀不一致，或 merge-event
+    错把 `is_generative_merge` 记为 depth；
+26. local surrogate token 被报告为 exact model tokens，或在无 tokenizer/
+    provider 误差和 safety-margin 证据时放行 Q0。
 
 ## L4 Dataset Qualification
 
@@ -2442,10 +2494,20 @@ build-judge-qualification-cache
 - PlanNodeRaw child graph 合法，order role 与 critical path 可重建；
 - generated materialization 恰好一个 accepted binding；cache 不伪造 API
   attempt；deterministic 不进入 generative rewrite lineage；
+- `AcceptedOutputBindingRaw` 只绑定 accepted generated API output；cache 与
+  deterministic 只通过 creation/materialization event 与 source artifact
+  建立接受关系；
 - failed 与 successful-nonmaterialized attempt 不进入 materialized lineage；
+- 所有 attempt 都有 requested identity/route 和 nullable returned identity keys，
+  outcome 条件、非空字符串与禁止伪造占位符的规则与 schema 一致；
+- canonical path 可按后缀方向重建，MergeEventMetrics 仅有
+  `is_generative_merge`，EvidenceExposure 的 `generative_rewrite_depth`
+  等于 leaf-to-root generative path 长度；
 - cached input 是 total input 的子集且不会重复计数；reasoning token 不被
   作为额外 output 计数；
-- provider usage missing 保留为 unknown，不能被 local token 或零替代；
+- provider usage missing 保留为 unknown，不能被 local surrogate token 或零替代；
+- local surrogate 字段与 provider/model token 字段分离，所有相关
+  pressure/compression/utilization/balance 报告均明示其 proxy 口径；
 - accepted-path 与 observed operational work 可对账，shared leaf 不跨 plan
   重复；judge overhead 不进入 lifecycle cost；
 - support labels 无法进入 construction/answer view，support mapping 状态显式
@@ -2641,12 +2703,16 @@ specification 与 full-leaf blocking tests。该 milestone 不读取 acceptance�
 Project judge 已在 Day 1 探活，本阶段不得临时换模型；official compatibility
 audit 单独记录。前一项未通过不得进入后一项。
 
-当前状态（2026-08-03）：Evaluator Parity 已由 run
+当前状态（2026-08-04）：Evaluator Parity 已由 run
 `evaluator-parity-cdc9dc290e214da2bab361283dd163bd` 通过。两份官方源码
 checksum、6 个 deterministic cases 与 5 个 LongMemEval prompt hashes 全部
 一致；official dated GPT-4o snapshot 不在已通过的 Day 1 inventory 中，已按
-规则记录外部限制且没有 fallback。Judge Repeatability 与 Cache
-Qualification 尚未开始，full leaves 仍禁止。
+规则记录外部限制且没有 fallback。Judge Repeatability 已由 run
+`judge-repeatability-4c37b7794c664566a4d9dbfba4ef27f9` 尝试：首个 logical
+call 的 direct 与 `proxy_17897` 均返回 HTTP 403，得到零个 accepted
+observations。该结果只证明外部访问停滞，不构成 repeatability 通过或失败
+估计；`next_stage=judge_repeatability`，Cache Qualification 未开始，
+`full_leaf_generation_allowed=false`。
 
 ## M5：Secondary Data Structural Audits
 
@@ -2986,15 +3052,27 @@ Q0 的实际时间由模型吞吐决定，不承诺包含在 14 个工作日内�
 - periodic reconstruction interval 合同明确；
 - prompt/operator config 冻结；
 - logical child graph 合法，`PlanMetrics` 可完全从 `PlanNodeRaw` 重建；
-- order-role path 由 frozen evidence order 得到；
+- `order_role_path_vector_root_to_leaf` 与
+  `order_role_sequence_root_to_leaf` 由 frozen evidence order 得到且走向与
+  后缀一致；
+- `generative_merge_path_leaf_to_root` 按 evidence leaf 到 root 重建；
 - `critical_path_merge_count` 与递归 tree height 一致；
-- cache hit 不改变 `generative_rewrite_depth`。
+- MergeEventMetrics 只使用 `is_generative_merge`，EvidenceExposure 的
+  `generative_rewrite_depth` 只由 leaf-to-root generative path 长度得到，
+  cache hit 不改变该长度。
 
 ## G-COST
 
 - construction/query 分开；
-- provider/local token 字段分离，`provider_usage_source` 与
+- provider/local-surrogate token 字段分离，`provider_usage_source` 与
   `usage_schema_version` 存在；
+- local 字段只使用 `local_surrogate_content_tokens`、
+  `local_surrogate_serialized_input_tokens` 和
+  `local_surrogate_output_content_tokens`，相关 pressure、compression、
+  utilization 与 balance 只作 local-surrogate proxy；
+- Q0 前已冻结真实模型 tokenizer revision，或已有 provider/tokenizer
+  误差界、充足 safety margin 和不超真实模型预算的测试证据；当前
+  不预设该内部资格条件已通过；
 - cached input 是 total input 的子集，reasoning 是 output 的子集，二者均不
   重复计数；
 - accepted-path 与 observed operational work 可分离、可对账；
@@ -3018,9 +3096,14 @@ Q0 的实际时间由模型吞吐决定，不承诺包含在 14 个工作日内�
 - clean rebuild checksum 一致；
 - prompts/models/seeds/cache/power artifact 可恢复；
 - derived metrics 可从 raw artifacts 重建；
-- `AcceptedOutputBindingRaw` 是 accepted output 唯一真值，creation event 是
-  materialization lineage 唯一来源；
+- `AcceptedOutputBindingRaw` 是 accepted generated API output 唯一真值；
+  cache/deterministic 的接受关系仅由 creation/materialization event 与
+  source artifact 重建，不伪造 binding；
 - failed/nonmaterialized attempts 不进入 lineage，cache 不伪造 attempt；
+- failed/cancelled attempt 的 nullable returned identity 与 successful attempt 的
+  mandatory returned identity 可从 raw artifacts 按 outcome 重新验证，且无占位符；
+- 路径方向、per-event `is_generative_merge` 与 EvidenceExposure depth
+  可由 raw child/merge edges 重建，不保留无方向旧字段；
 - support labels 未进入 construction/answer artifacts，support mapping 与
   unique-leaf aggregation 可重建；
 - tokenizer、serialization、executor/cache/retry/rate-limit/route config 在
@@ -3214,8 +3297,10 @@ pytest \
   可由 raw artifacts 完整重建；
 - [ ] cache lineage 只来自 creation event，NodeArtifact 没有
   `cache_source_artifact_id`；
-- [ ] provider/local token、cached/reasoning subset、unknown 与 optional USD
-  口径通过回归测试；
+- [ ] provider/local-surrogate token、cached/reasoning subset、unknown 与
+  optional USD 口径通过回归测试，surrogate 没有被报告为 exact
+  model tokens；
+- [ ] Q0 前 G-COST 内部的 tokenizer 二选一资格证据已通过；
 - [ ] deployment/shared/artifact state、judge overhead 与 memory lifecycle cost
   边界通过回归测试；
 - [ ] ConstructionInputView、AnswerInputView 和 ScoringInputView label access
