@@ -23,6 +23,7 @@ test-first:
 	  tests/qualification/test_judge_repeatability.py \
 	  tests/qualification/test_judge_repeatability_gate.py \
 	  tests/qualification/test_judge_repeatability_cli.py \
+	  tests/qualification/test_judge_topology_smoke.py \
 	  tests/statistics/test_power_uses_independent_episode_count.py \
 	  tests/statistics/test_null_matches_r_run_mean.py \
 	  -q
