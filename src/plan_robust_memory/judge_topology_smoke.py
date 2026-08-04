@@ -147,6 +147,13 @@ def _candidate_rows(episode: Mapping[str, Any], index: int) -> list[dict[str, An
 
 
 def _request_payload(row: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    return _request_payload_for_model(row, judge_model=PROJECT_JUDGE_MODEL)
+
+
+def _request_payload_for_model(
+    row: Mapping[str, Any], *, judge_model: str
+) -> tuple[dict[str, Any], str]:
+    _require_text(judge_model, "judge_model")
     prompt = project_judge_prompt(
         str(row["question_type"]),
         str(row["question"]),
@@ -155,16 +162,19 @@ def _request_payload(row: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
         abstention=bool(row["abstention"]),
     )
     payload = {
-        "model": PROJECT_JUDGE_MODEL,
+        "model": judge_model,
         "messages": [{"role": "user", "content": prompt}],
         **DECODING_CONFIG,
     }
-    _validate_pure_chat_payload(payload)
+    _validate_pure_chat_payload(payload, judge_model=judge_model)
     return payload, prompt
 
 
-def _validate_pure_chat_payload(payload: Mapping[str, Any]) -> None:
-    if payload.get("model") != PROJECT_JUDGE_MODEL:
+def _validate_pure_chat_payload(
+    payload: Mapping[str, Any], *, judge_model: str = PROJECT_JUDGE_MODEL
+) -> None:
+    _require_text(judge_model, "judge_model")
+    if payload.get("model") != judge_model:
         raise JudgeTopologySmokeError("judge smoke model drifted")
     if "response_format" in payload:
         raise JudgeTopologySmokeError("judge smoke must not send response_format")
@@ -197,6 +207,7 @@ def _artifact_entry(
     source_episode_count: int,
     eligible_episode_count: int,
     skipped_episode_count: int,
+    judge_model: str = PROJECT_JUDGE_MODEL,
     reason: str | None = None,
 ) -> dict[str, Any]:
     accepted = [row for row in observations if row["parse_success"]]
@@ -226,7 +237,7 @@ def _artifact_entry(
         "candidate_observation_count": len(observations),
         "request_contract": {
             "endpoint": CHAT_COMPLETIONS_URL,
-            "model": PROJECT_JUDGE_MODEL,
+            "model": judge_model,
             "message_contract": MESSAGE_CONTRACT,
             "messages_per_request": 1,
             "allowed_roles": ["user"],
@@ -286,9 +297,11 @@ def run_judge_topology_smoke(
     now_fn: NowFn = _now,
     timeout: float = 120.0,
     run_id: str | None = None,
+    judge_model: str = PROJECT_JUDGE_MODEL,
 ) -> dict[str, Any]:
     if not isinstance(api_key, str) or not api_key.strip():
         raise JudgeTopologySmokeError("OPENAI_API_KEY is required")
+    judge_model = _require_text(judge_model, "judge_model")
     eligible_episodes, source_episode_count, skipped_episode_count = (
         _eligible_calibration_episodes(calibration_artifact)
     )
@@ -322,6 +335,7 @@ def run_judge_topology_smoke(
             source_episode_count=source_episode_count,
             eligible_episode_count=len(eligible_episodes),
             skipped_episode_count=skipped_episode_count,
+            judge_model=judge_model,
             reason=reason,
         )
         _write_json(artifact_path, artifact)
@@ -330,7 +344,7 @@ def run_judge_topology_smoke(
 
     try:
         for row in cases:
-            payload, prompt = _request_payload(row)
+            payload, prompt = _request_payload_for_model(row, judge_model=judge_model)
             response: Mapping[str, Any] | None = None
             response_metadata: Mapping[str, Any] | None = None
             accepted_route = ""
@@ -430,6 +444,7 @@ def run_judge_topology_smoke(
                             scheduled_at=attempt_started,
                             finished_at=attempt_finished,
                             failure_type=type(exc).__name__,
+                            requested_model=judge_model,
                         )
                     )
                     response = None
@@ -454,10 +469,10 @@ def run_judge_topology_smoke(
                     "response_hash": response_hash,
                 }
             )[:20]
-            if returned_model != PROJECT_JUDGE_MODEL or request_id is None:
+            if returned_model != judge_model or request_id is None:
                 failure_type = (
                     "returned_model_drift"
-                    if returned_model != PROJECT_JUDGE_MODEL
+                    if returned_model != judge_model
                     else "missing_request_id"
                 )
                 attempts.append(
@@ -478,6 +493,7 @@ def run_judge_topology_smoke(
                         outcome="failed_validation",
                         parse_status="not_attempted",
                         failure_type=failure_type,
+                        requested_model=judge_model,
                     )
                 )
                 raise JudgeTopologySmokeError(failure_type)
@@ -502,6 +518,7 @@ def run_judge_topology_smoke(
                         outcome="failed_parse",
                         parse_status="failed",
                         failure_type="strict_json_parse_failure",
+                        requested_model=judge_model,
                     )
                 )
                 raise JudgeTopologySmokeError(f"strict JSON parse failure: {exc}") from exc
@@ -523,6 +540,7 @@ def run_judge_topology_smoke(
                 outcome="accepted_materialized",
                 parse_status="passed",
                 failure_type=None,
+                requested_model=judge_model,
             )
             attempts.append(attempt)
             output_artifact_id = "judge-smoke-output-" + stable_hash(
@@ -578,7 +596,7 @@ def run_judge_topology_smoke(
                     "attempt_id": attempt_id,
                     "binding_id": binding_id,
                     "output_artifact_id": output_artifact_id,
-                    "requested_model": PROJECT_JUDGE_MODEL,
+                    "requested_model": judge_model,
                     "returned_model": returned_model,
                     "provider_route": accepted_route,
                     "prompt_hash": attempt["prompt_hash"],
@@ -600,6 +618,7 @@ def prepare_and_run_judge_topology_smoke(
     request_fn: RequestFn = _http_json_request,
     now_fn: NowFn = _now,
     timeout: float = 120.0,
+    judge_model: str = PROJECT_JUDGE_MODEL,
 ) -> dict[str, Any]:
     return run_judge_topology_smoke(
         calibration_artifact=_load_json_object(calibration_artifact_path),
@@ -609,6 +628,7 @@ def prepare_and_run_judge_topology_smoke(
         request_fn=request_fn,
         now_fn=now_fn,
         timeout=timeout,
+        judge_model=judge_model,
     )
 
 
@@ -628,6 +648,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--case-count", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--judge-model",
+        default=os.environ.get("PROJECT_JUDGE_MODEL", PROJECT_JUDGE_MODEL),
+        help="Calibration-only smoke judge model override; does not change the frozen Judge Repeatability Gate",
+    )
     args = parser.parse_args(argv)
     api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("LABFORGE_API_KEY")
     try:
@@ -639,6 +664,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             request_fn=_http_json_request,
             now_fn=_now,
             timeout=args.timeout,
+            judge_model=args.judge_model,
         )
     except (OSError, json.JSONDecodeError, ContractError) as exc:
         print(

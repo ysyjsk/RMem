@@ -33,7 +33,7 @@ from .observability import (
 )
 
 
-PROJECT_JUDGE_MODEL = "gpt-5.5"
+PROJECT_JUDGE_MODEL = "gpt-5.6-luna"
 BASE_URL = "https://api.labforge.cc/v1"
 CHAT_COMPLETIONS_URL = f"{BASE_URL}/chat/completions"
 PROXY_URL = "http://127.0.0.1:17897"
@@ -1192,6 +1192,7 @@ def _attempt_record(
     outcome: str,
     parse_status: str,
     failure_type: str | None,
+    requested_model: str = PROJECT_JUDGE_MODEL,
 ) -> dict[str, Any]:
     source, input_total, cached, output_total, reasoning = _provider_usage(response)
     returned_model = _observed_provider_identity(response.get("model"))
@@ -1202,7 +1203,7 @@ def _attempt_record(
         "logical_call_id": logical_call_id,
         "accepted_attempt": outcome == "accepted_materialized",
         "retry_index": retry_index,
-        "requested_model": PROJECT_JUDGE_MODEL,
+        "requested_model": requested_model,
         "returned_model": returned_model,
         "provider": "labforge",
         "provider_route": route,
@@ -1247,6 +1248,7 @@ def _failed_attempt_record(
     scheduled_at: str,
     finished_at: str,
     failure_type: str,
+    requested_model: str = PROJECT_JUDGE_MODEL,
 ) -> dict[str, Any]:
     response_object: Mapping[str, Any] = response if isinstance(response, Mapping) else {}
     metadata: Mapping[str, Any] = (
@@ -1267,7 +1269,7 @@ def _failed_attempt_record(
         "logical_call_id": logical_call_id,
         "accepted_attempt": False,
         "retry_index": retry_index,
-        "requested_model": PROJECT_JUDGE_MODEL,
+        "requested_model": requested_model,
         "returned_model": returned_model,
         "provider": "labforge",
         "provider_route": route,
